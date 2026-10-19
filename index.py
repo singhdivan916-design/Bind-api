@@ -1,6 +1,7 @@
 # ============================================================
-# Free Fire Region Binder — v3
-# Full 5-step flow: Token → MajorLogin → ChooseRegion → MajorLogin → GetLoginData
+# Free Fire Region Binder — v4 (no GetLoginData)
+# Flow: Token → MajorLogin → ChooseRegion (skipped if already bound)
+#       → MajorLogin (after choose)
 # Every request → 200 + JSON. Never crash.
 # ============================================================
 import os
@@ -64,6 +65,7 @@ HOME_INFO = {
         "path": "/bind",
         "methods": ["GET", "POST"],
         "params": ["uid", "password", "region"],
+        "optional_params": ["force"],
         "usage": {
             "GET": "/bind?uid=YOUR_UID&password=YOUR_PASSWORD&region=IND",
             "POST": {
@@ -90,14 +92,14 @@ HOME_INFO = {
     "flow": [
         "1. Token grant",
         "2. MajorLogin (initial)",
-        "3. ChooseRegion (target)",
+        "3. ChooseRegion (target) — skipped if lock_region already == target",
         "4. MajorLogin (after choose)",
-        "5. GetLoginData (target)",
     ],
     "notes": [
-        "All 5 steps run every call — no shortcuts.",
-        "Full flow needs ~4-10s. Hobby caps at 10s — use Pro for reliability.",
-        "On Pro set env FF_TIME_BUDGET=55 for full window.",
+        "ChooseRegion only succeeds on accounts with empty lock_region (fresh accounts).",
+        "If account is already locked to a different region, rebinding fails with a clear error.",
+        "If account is already on target region, ChooseRegion is skipped and flow succeeds.",
+        "Set env FF_TIME_BUDGET=55 on Vercel Pro for full window; Hobby caps at 10s.",
     ],
 }
 
@@ -116,9 +118,6 @@ rElEaSe_TaG = "OB55"
 rUnTiMe_vErSiOn = "2.133.9"
 
 sErVeR = "https://loginbp.ppmainecoonghj.com/"
-cLiEnT_IND = "https://client.ind.freefiremobile.com/"
-cLiEnT_US = "https://client.us.freefiremobile.com/"
-cLiEnT_GLOBAL = "https://clientbp.ppmainecoonghj.com/"
 
 oAuTh_ToKeN = "https://100067.connect.garena.com/oauth/guest/token/grant"
 
@@ -127,7 +126,6 @@ lAnGuAgE_bY_rEgIoN = {
     "BD": "bn", "PK": "ur", "TW": "zh", "CIS": "ru",
     "SAC": "es", "BR": "pt",
 }
-aMeRiCaN_rEgIoNs = {"BR", "SAC"}
 
 iP_aDdReSsEs = [
     "151.158.158.220", "151.158.158.221", "151.158.158.222", "151.158.158.223",
@@ -308,22 +306,6 @@ def gA_sV():
         return "0"
 
 
-def server_endpoint(_region):
-    return sErVeR
-
-
-def client_endpoint(region):
-    try:
-        c = str(region).upper()
-    except Exception:
-        return cLiEnT_GLOBAL
-    if c == "IND":
-        return cLiEnT_IND
-    if c in aMeRiCaN_rEgIoNs:
-        return cLiEnT_US
-    return cLiEnT_GLOBAL
-
-
 # ============================================================
 # Network calls
 # ============================================================
@@ -398,7 +380,7 @@ def send_major_login(session, access_token, open_id, platform_type=4, user_agent
     to = _call_timeout(20.0)
     if to is None:
         raise Exception("time_budget_exhausted_major_login")
-    url = server_endpoint(region) + "MajorLogin"
+    url = sErVeR + "MajorLogin"
     host = url.split("/")[2] if "//" in url else url
     body = major_login_body(access_token, open_id, platform_type, region,
                             safe_choice(iP_aDdReSsEs, "151.158.158.220"))
@@ -428,7 +410,7 @@ def send_choose_region(session, region, jwt, user_agent=None):
     to = _call_timeout(15.0)
     if to is None:
         raise Exception("time_budget_exhausted_choose_region")
-    url = server_endpoint(region) + "ChooseRegion"
+    url = sErVeR + "ChooseRegion"
     host = url.split("/")[2] if "//" in url else url
     target = "RU" if str(region).upper() == "CIS" else str(region).upper()
     enc = eNcRyPt_aEs(aSsEmBlE_pRoTo({1: target}))
@@ -448,34 +430,10 @@ def send_choose_region(session, region, jwt, user_agent=None):
     return session.post(url, data=enc, headers=headers, timeout=to, verify=False)
 
 
-def send_get_login_data(session, jwt, open_id, region, user_agent):
-    to = _call_timeout(8.0)
-    if to is None:
-        raise Exception("time_budget_exhausted_get_login_data")
-    url = client_endpoint(region) + "GetLoginData"
-    host = url.split("/")[2] if "//" in url else url
-    body = major_login_body(jwt, open_id, 4, region,
-                            safe_choice(iP_aDdReSsEs, "151.158.158.220"))
-    enc = eNcRyPt_aEs(aSsEmBlE_pRoTo(body))
-    headers = {
-        "Host": host,
-        "User-Agent": user_agent or uNiTy_AgEnTs[1],
-        "Accept": "*/*",
-        "Accept-Encoding": "deflate, gzip",
-        "Authorization": f"Bearer {jwt}",
-        "X-GA": "v1 1",
-        "ReleaseVersion": rElEaSe_TaG,
-        "Content-Type": "application/octet-stream",
-        "X-Unity-Version": "2022.3.47f1",
-    }
-    r = session.post(url, headers=headers, data=enc, verify=False, timeout=to)
-    return r.status_code, r.content
-
-
 # ============================================================
-# Main flow — FULL 5 STEPS, no shortcuts
+# Main flow — 4 steps, no GetLoginData
 # ============================================================
-def bind_region(uid, password, region):
+def bind_region(uid, password, region, force=False):
     region = str(region).upper()
     session = None
     try:
@@ -488,7 +446,7 @@ def bind_region(uid, password, region):
         mSDK_ua = safe_choice(mSdK_aGeNtS, mSdK_aGeNtS[0])
         unity_ua = safe_choice(uNiTy_AgEnTs, uNiTy_AgEnTs[0])
 
-        # ── STEP 1: Token grant ──────────────────────────────────
+        # ── STEP 1: Token grant ──────────────────────────────
         try:
             access_token, open_id = request_token(session, uid, password, mSDK_ua)
         except Exception as e:
@@ -497,7 +455,7 @@ def bind_region(uid, password, region):
                     "stage": "token",
                     "developer": DEVELOPER}
 
-        # ── STEP 2: Initial MajorLogin ───────────────────────────
+        # ── STEP 2: Initial MajorLogin ───────────────────────
         try:
             login1 = send_major_login(session, access_token, open_id, 4, unity_ua, region)
         except Exception as e:
@@ -520,26 +478,52 @@ def bind_region(uid, password, region):
 
         target = "RU" if region == "CIS" else region
         previous_region = jWt_ReGiOn(jwt1)
+        already_on_target = bool(previous_region) and str(previous_region).upper() == target
 
-        # ── STEP 3: ChooseRegion — ALWAYS runs ───────────────────
-        try:
-            cr = send_choose_region(session, region, jwt1, unity_ua)
-            if getattr(cr, "status_code", 0) != 200:
-                return {"success": False,
-                        "error": f"choose_region_http_{getattr(cr, 'status_code', 0)}",
-                        "stage": "choose_region",
-                        "previous_region": previous_region,
-                        "jwt": jwt1,
-                        "developer": DEVELOPER}
-        except Exception as e:
-            return {"success": False,
-                    "error": f"choose_region_exception: {e}",
-                    "stage": "choose_region",
-                    "previous_region": previous_region,
-                    "jwt": jwt1,
-                    "developer": DEVELOPER}
+        # ── STEP 3: ChooseRegion (skipped if already on target) ─
+        choose_region_status = None
+        choose_region_body = None
+        choose_region_ok = False
+        choose_region_skipped = False
 
-        # ── STEP 4: MajorLogin (given region) ────────────────────
+        if already_on_target and not force:
+            choose_region_skipped = True
+        else:
+            try:
+                cr = send_choose_region(session, region, jwt1, unity_ua)
+                choose_region_status = getattr(cr, "status_code", 0)
+                try:
+                    choose_region_body = (cr.text or "")[:1000] if hasattr(cr, "text") else None
+                except Exception:
+                    choose_region_body = None
+                if choose_region_status == 200:
+                    choose_region_ok = True
+            except Exception as e:
+                choose_region_status = None
+                choose_region_body = str(e)[:500]
+
+        # Failure handling — not on target and ChooseRegion rejected → can't rebind
+        if not choose_region_ok and not choose_region_skipped and not already_on_target:
+            return {
+                "success": False,
+                "error": f"choose_region_failed_status_{choose_region_status}",
+                "stage": "choose_region",
+                "target_region": target,
+                "previous_region": previous_region,
+                "choose_region_status": choose_region_status,
+                "choose_region_body": choose_region_body,
+                "note": (
+                    "ChooseRegion is a one-time endpoint — it only works on "
+                    "accounts whose lock_region is empty (fresh / never played). "
+                    f"This account is already locked to {previous_region!r} and "
+                    f"cannot be rebound to {target!r}. Use a fresh account or "
+                    "the force=true param to inspect the raw server response."
+                ),
+                "jwt": jwt1,
+                "developer": DEVELOPER,
+            }
+
+        # ── STEP 4: MajorLogin (after choose, target region) ──
         try:
             login2 = send_major_login(session, access_token, open_id, 4, unity_ua, region)
         except Exception as e:
@@ -547,6 +531,7 @@ def bind_region(uid, password, region):
                     "error": f"major_login_after_choose_failed: {e}",
                     "stage": "major_login_after_choose",
                     "previous_region": previous_region,
+                    "choose_region_status": choose_region_status,
                     "developer": DEVELOPER}
 
         jwt2 = login2.get(8)
@@ -563,60 +548,30 @@ def bind_region(uid, password, region):
                     "developer": DEVELOPER}
 
         new_lock = jWt_ReGiOn(jwt2)
-
-        # ── STEP 5: GetLoginData — COMPULSORY ────────────────────
-        try:
-            st, content = send_get_login_data(session, jwt2, open_id, region, unity_ua)
-        except Exception as e:
-            return {"success": False,
-                    "error": f"get_login_data_exception: {e}",
-                    "stage": "get_login_data",
-                    "previous_region": previous_region,
-                    "new_lock_region": new_lock,
-                    "jwt": jwt2,
-                    "developer": DEVELOPER}
-
-        if st != 200:
-            return {"success": False,
-                    "error": f"get_login_data_http_{st}",
-                    "stage": "get_login_data",
-                    "previous_region": previous_region,
-                    "new_lock_region": new_lock,
-                    "jwt": jwt2,
-                    "developer": DEVELOPER}
-
-        try:
-            parsed = pArSe_pRoTo(content)
-        except Exception as e:
-            return {"success": False,
-                    "error": f"get_login_data_parse_failed: {e}",
-                    "stage": "get_login_data",
-                    "previous_region": previous_region,
-                    "new_lock_region": new_lock,
-                    "jwt": jwt2,
-                    "developer": DEVELOPER}
-
-        login_data = {
-            "account_uid":     parsed.get(1),
-            "account_name":    parsed.get(4),
-            "region":          parsed.get(3),
-            "online_ip_port":  parsed.get(14),
-            "clan_id":         parsed.get(20),
-            "account_ip_port": parsed.get(32),
-        }
-
         ok = bool(new_lock) and str(new_lock).upper() == target
+
+        if ok and choose_region_ok:
+            message = f"Region bound to {target}"
+        elif ok and choose_region_skipped:
+            message = f"Account already on {target} (ChooseRegion skipped)"
+        elif ok and already_on_target:
+            message = f"Account already on {target} (ChooseRegion failed but region matches)"
+        else:
+            message = f"lock_region={new_lock!r} (expected {target})"
+
         return {
-            "success": ok,
-            "message": (f"Region bound to {target}" if ok
-                        else f"lock_region={new_lock!r} (expected {target})"),
-            "target_region":   target,
-            "previous_region": previous_region,
-            "new_lock_region": new_lock,
-            "uid":             uid,
-            "jwt":             jwt2,
-            "login_data":      login_data,
-            "developer":       DEVELOPER,
+            "success":               ok,
+            "message":               message,
+            "target_region":         target,
+            "previous_region":       previous_region,
+            "new_lock_region":       new_lock,
+            "changed":               choose_region_ok,
+            "already_bound":         choose_region_skipped or already_on_target,
+            "choose_region_status":  choose_region_status,
+            "choose_region_body":    choose_region_body if not choose_region_ok else None,
+            "uid":                   uid,
+            "jwt":                   jwt2,
+            "developer":             DEVELOPER,
         }
 
     except BaseException as e:
@@ -756,6 +711,8 @@ class handler(BaseHTTPRequestHandler):
         if len(password) > MAX_PWD_LEN:  password = password[:MAX_PWD_LEN]
         if len(region) > MAX_REGION_LEN: region = region[:MAX_REGION_LEN]
 
+        force = str(params.get("force", "") or "").strip().lower() in ("1", "true", "yes")
+
         # ---- 4) recover intended path (Vercel rewrites → /index.py) ----
         path = raw_path.rstrip("/") or "/"
 
@@ -798,7 +755,7 @@ class handler(BaseHTTPRequestHandler):
                 return
 
             try:
-                result = bind_region(uid, password, region)
+                result = bind_region(uid, password, region, force=force)
             except BaseException as e:
                 result = {"success": False,
                           "error": f"bind_region_exception: {type(e).__name__}: {e}",
