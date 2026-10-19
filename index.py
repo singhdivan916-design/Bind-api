@@ -1,6 +1,7 @@
 # ============================================================
-# Bulletproof Free Fire Region Binder — v2 (per-request timer)
-# Every request → 200 + JSON. Never crash. Never preemptively skip.
+# Free Fire Region Binder — v3
+# Full 5-step flow: Token → MajorLogin → ChooseRegion → MajorLogin → GetLoginData
+# Every request → 200 + JSON. Never crash.
 # ============================================================
 import os
 import json
@@ -20,16 +21,17 @@ try:
 except Exception:
     pass
 
-# ---- per-request budget (reset in _handle) ----
-# Hobby-safe default = 9s. For Vercel Pro (60s maxDuration), set env:
-#   FF_TIME_BUDGET = "55"
+# ---- per-request budget (reset at top of _handle) ----
+# Hobby default = 9s. For Vercel Pro (60s), set env FF_TIME_BUDGET="55"
 TOTAL_BUDGET = float(os.environ.get("FF_TIME_BUDGET", "9"))
 _MIN_CALL_BUDGET = 2.0
-_REQUEST_START = time.time()   # overwritten per request
+_REQUEST_START = time.time()  # overwritten per request
+
 
 def _reset_timer():
     global _REQUEST_START
     _REQUEST_START = time.time()
+
 
 def _time_left():
     try:
@@ -37,8 +39,9 @@ def _time_left():
     except Exception:
         return 0.0
 
+
 def _call_timeout(desired=15.0):
-    """Return per-call timeout, or None only if truly no time left."""
+    """Return per-call timeout, or None only if truly out of time."""
     try:
         left = _time_left()
         if left < _MIN_CALL_BUDGET:
@@ -46,6 +49,7 @@ def _call_timeout(desired=15.0):
         return max(2.0, min(desired, left - 1.0))
     except Exception:
         return None
+
 
 # ============================================================
 # Home info
@@ -83,9 +87,17 @@ HOME_INFO = {
         "ME", "IND", "ID", "VN", "TH", "BD",
         "PK", "TW", "CIS", "SAC", "BR",
     ],
+    "flow": [
+        "1. Token grant",
+        "2. MajorLogin (initial)",
+        "3. ChooseRegion (target)",
+        "4. MajorLogin (after choose)",
+        "5. GetLoginData (target)",
+    ],
     "notes": [
-        "Total flow needs ~7-12s. Vercel Hobby caps at 10s — use Pro (60s) for reliability.",
-        "On Pro set env FF_TIME_BUDGET=55 for the full window.",
+        "All 5 steps run every call — no shortcuts.",
+        "Full flow needs ~4-10s. Hobby caps at 10s — use Pro for reliability.",
+        "On Pro set env FF_TIME_BUDGET=55 for full window.",
     ],
 }
 
@@ -141,6 +153,7 @@ MAX_UID_LEN = 64
 MAX_PWD_LEN = 256
 MAX_REGION_LEN = 8
 
+
 # ============================================================
 # Safe helpers
 # ============================================================
@@ -149,6 +162,7 @@ def safe_choice(seq, default=None):
         return random.choice(seq)
     except Exception:
         return default
+
 
 def safe_json(obj, **kw):
     try:
@@ -162,6 +176,7 @@ def safe_json(obj, **kw):
             except Exception:
                 return '{"success":false}'
 
+
 # ============================================================
 # Protobuf helpers
 # ============================================================
@@ -174,16 +189,20 @@ def wRiTe_vArInT(vAlUe):
     oUt.append(vAlUe)
     return bytes(oUt)
 
+
 def fIeLd_iNt(n, v):
     return wRiTe_vArInT((n << 3) | 0) + wRiTe_vArInT(v)
+
 
 def fIeLd_sTr(n, v):
     e = str(v).encode("utf-8")
     return wRiTe_vArInT((n << 3) | 2) + wRiTe_vArInT(len(e)) + e
 
+
 def fIeLd_bYtEs(n, v):
     v = bytes(v)
     return wRiTe_vArInT((n << 3) | 2) + wRiTe_vArInT(len(v)) + v
+
 
 def aSsEmBlE_pRoTo(fields):
     buf = bytearray()
@@ -201,6 +220,7 @@ def aSsEmBlE_pRoTo(fields):
             continue
     return bytes(buf)
 
+
 def rEaD_vArInT(d, o):
     r, s = 0, 0
     while True:
@@ -215,6 +235,7 @@ def rEaD_vArInT(d, o):
         if s > 63:
             raise ValueError("varint too long")
     return r, o
+
 
 def pArSe_pRoTo(d):
     out, o = {}, 0
@@ -243,17 +264,21 @@ def pArSe_pRoTo(d):
                 except Exception:
                     out[fn] = chunk.hex()
             elif wt == 1:
-                out[fn] = d[o:o + 8].hex(); o += 8
+                out[fn] = d[o:o + 8].hex()
+                o += 8
             elif wt == 5:
-                out[fn] = d[o:o + 4].hex(); o += 4
+                out[fn] = d[o:o + 4].hex()
+                o += 4
             else:
                 break
         except Exception:
             break
     return out
 
+
 def eNcRyPt_aEs(plain):
     return AES.new(aEs_KeY, AES.MODE_CBC, aEs_Iv).encrypt(pad(plain, AES.block_size))
+
 
 def dEcOdE_jWt(tok):
     try:
@@ -267,6 +292,7 @@ def dEcOdE_jWt(tok):
     except Exception:
         return {}
 
+
 def jWt_ReGiOn(tok):
     try:
         d = dEcOdE_jWt(tok)
@@ -274,14 +300,17 @@ def jWt_ReGiOn(tok):
     except Exception:
         return None
 
+
 def gA_sV():
     try:
         return str(int(time.time()))
     except Exception:
         return "0"
 
+
 def server_endpoint(_region):
     return sErVeR
+
 
 def client_endpoint(region):
     try:
@@ -294,8 +323,9 @@ def client_endpoint(region):
         return cLiEnT_US
     return cLiEnT_GLOBAL
 
+
 # ============================================================
-# Network calls — generous timeouts, only skip if truly out of time
+# Network calls
 # ============================================================
 def request_token(session, uid, password, user_agent):
     to = _call_timeout(20.0)
@@ -325,6 +355,7 @@ def request_token(session, uid, password, user_agent):
     if not at or not oid:
         raise Exception(f"Token grant failed: {str(data)[:200]}")
     return str(at), str(oid)
+
 
 def major_login_body(access_token, open_id, platform_type, region, ip):
     region_s = str(region).upper()
@@ -362,6 +393,7 @@ def major_login_body(access_token, open_id, platform_type, region, ip):
         107: "1.9393e7b8e53e8aeb",
     }
 
+
 def send_major_login(session, access_token, open_id, platform_type=4, user_agent=None, region="IND"):
     to = _call_timeout(20.0)
     if to is None:
@@ -391,6 +423,7 @@ def send_major_login(session, access_token, open_id, platform_type=4, user_agent
         raise Exception("MajorLogin response too short")
     return pArSe_pRoTo(r.content[64:])
 
+
 def send_choose_region(session, region, jwt, user_agent=None):
     to = _call_timeout(15.0)
     if to is None:
@@ -414,10 +447,11 @@ def send_choose_region(session, region, jwt, user_agent=None):
     }
     return session.post(url, data=enc, headers=headers, timeout=to, verify=False)
 
+
 def send_get_login_data(session, jwt, open_id, region, user_agent):
     to = _call_timeout(8.0)
     if to is None:
-        return 0, b""
+        raise Exception("time_budget_exhausted_get_login_data")
     url = client_endpoint(region) + "GetLoginData"
     host = url.split("/")[2] if "//" in url else url
     body = major_login_body(jwt, open_id, 4, region,
@@ -437,8 +471,9 @@ def send_get_login_data(session, jwt, open_id, region, user_agent):
     r = session.post(url, headers=headers, data=enc, verify=False, timeout=to)
     return r.status_code, r.content
 
+
 # ============================================================
-# Main flow
+# Main flow — FULL 5 STEPS, no shortcuts
 # ============================================================
 def bind_region(uid, password, region):
     region = str(region).upper()
@@ -453,114 +488,149 @@ def bind_region(uid, password, region):
         mSDK_ua = safe_choice(mSdK_aGeNtS, mSdK_aGeNtS[0])
         unity_ua = safe_choice(uNiTy_AgEnTs, uNiTy_AgEnTs[0])
 
-        # 1) token — required, never skipped
+        # ── STEP 1: Token grant ──────────────────────────────────
         try:
             access_token, open_id = request_token(session, uid, password, mSDK_ua)
         except Exception as e:
-            return {"success": False, "error": f"token_grant_failed: {e}",
-                    "stage": "token", "developer": DEVELOPER}
+            return {"success": False,
+                    "error": f"token_grant_failed: {e}",
+                    "stage": "token",
+                    "developer": DEVELOPER}
 
-        # 2) initial MajorLogin — required
+        # ── STEP 2: Initial MajorLogin ───────────────────────────
         try:
             login1 = send_major_login(session, access_token, open_id, 4, unity_ua, region)
         except Exception as e:
-            return {"success": False, "error": f"major_login_failed: {e}",
-                    "stage": "major_login", "developer": DEVELOPER}
+            return {"success": False,
+                    "error": f"major_login_initial_failed: {e}",
+                    "stage": "major_login_initial",
+                    "developer": DEVELOPER}
 
-        jwt = login1.get(8)
-        if isinstance(jwt, bytes):
+        jwt1 = login1.get(8)
+        if isinstance(jwt1, bytes):
             try:
-                jwt = jwt.decode("utf-8", errors="ignore")
+                jwt1 = jwt1.decode("utf-8", errors="ignore")
             except Exception:
-                jwt = ""
-        if not jwt:
-            return {"success": False, "error": "major_login_no_jwt",
-                    "stage": "major_login", "developer": DEVELOPER}
+                jwt1 = ""
+        if not jwt1:
+            return {"success": False,
+                    "error": "major_login_initial_no_jwt",
+                    "stage": "major_login_initial",
+                    "developer": DEVELOPER}
 
         target = "RU" if region == "CIS" else region
-        current_lock = jWt_ReGiOn(jwt)
+        previous_region = jWt_ReGiOn(jwt1)
 
-        if current_lock and str(current_lock).upper() == target:
-            return {"success": True,
-                    "message": f"Account already bound to {target}",
-                    "region": region, "lock_region": current_lock,
-                    "uid": uid, "jwt": jwt, "developer": DEVELOPER}
-
-        # 3) ChooseRegion — required
+        # ── STEP 3: ChooseRegion — ALWAYS runs ───────────────────
         try:
-            cr = send_choose_region(session, region, jwt, unity_ua)
+            cr = send_choose_region(session, region, jwt1, unity_ua)
             if getattr(cr, "status_code", 0) != 200:
                 return {"success": False,
                         "error": f"choose_region_http_{getattr(cr, 'status_code', 0)}",
                         "stage": "choose_region",
-                        "previous_region": current_lock,
-                        "jwt": jwt, "developer": DEVELOPER}
+                        "previous_region": previous_region,
+                        "jwt": jwt1,
+                        "developer": DEVELOPER}
         except Exception as e:
             return {"success": False,
                     "error": f"choose_region_exception: {e}",
                     "stage": "choose_region",
-                    "previous_region": current_lock,
-                    "jwt": jwt, "developer": DEVELOPER}
-
-        # 4) re-login — required
-        new_jwt = None
-        relogin_err = None
-        try:
-            login2 = send_major_login(session, access_token, open_id, 4, unity_ua, region)
-            nj = login2.get(8)
-            if isinstance(nj, bytes):
-                nj = nj.decode("utf-8", errors="ignore")
-            if nj:
-                new_jwt = nj
-        except Exception as e:
-            relogin_err = str(e)
-
-        if not new_jwt:
-            return {"success": False,
-                    "error": ("relogin_no_jwt_after_choose_region"
-                              + (f": {relogin_err}" if relogin_err else "")),
-                    "stage": "relogin",
-                    "previous_region": current_lock,
+                    "previous_region": previous_region,
+                    "jwt": jwt1,
                     "developer": DEVELOPER}
 
-        new_lock = jWt_ReGiOn(new_jwt)
-
-        # 5) optional verification — skipped only if out of time
-        verified = None
+        # ── STEP 4: MajorLogin (given region) ────────────────────
         try:
-            st, content = send_get_login_data(session, new_jwt, open_id, region, unity_ua)
-            if st == 200:
-                parsed = pArSe_pRoTo(content)
-                verified = {"account_uid": parsed.get(1),
-                            "account_name": parsed.get(4),
-                            "region": parsed.get(3)}
-        except Exception:
-            verified = None
+            login2 = send_major_login(session, access_token, open_id, 4, unity_ua, region)
+        except Exception as e:
+            return {"success": False,
+                    "error": f"major_login_after_choose_failed: {e}",
+                    "stage": "major_login_after_choose",
+                    "previous_region": previous_region,
+                    "developer": DEVELOPER}
+
+        jwt2 = login2.get(8)
+        if isinstance(jwt2, bytes):
+            try:
+                jwt2 = jwt2.decode("utf-8", errors="ignore")
+            except Exception:
+                jwt2 = ""
+        if not jwt2:
+            return {"success": False,
+                    "error": "major_login_after_choose_no_jwt",
+                    "stage": "major_login_after_choose",
+                    "previous_region": previous_region,
+                    "developer": DEVELOPER}
+
+        new_lock = jWt_ReGiOn(jwt2)
+
+        # ── STEP 5: GetLoginData — COMPULSORY ────────────────────
+        try:
+            st, content = send_get_login_data(session, jwt2, open_id, region, unity_ua)
+        except Exception as e:
+            return {"success": False,
+                    "error": f"get_login_data_exception: {e}",
+                    "stage": "get_login_data",
+                    "previous_region": previous_region,
+                    "new_lock_region": new_lock,
+                    "jwt": jwt2,
+                    "developer": DEVELOPER}
+
+        if st != 200:
+            return {"success": False,
+                    "error": f"get_login_data_http_{st}",
+                    "stage": "get_login_data",
+                    "previous_region": previous_region,
+                    "new_lock_region": new_lock,
+                    "jwt": jwt2,
+                    "developer": DEVELOPER}
+
+        try:
+            parsed = pArSe_pRoTo(content)
+        except Exception as e:
+            return {"success": False,
+                    "error": f"get_login_data_parse_failed: {e}",
+                    "stage": "get_login_data",
+                    "previous_region": previous_region,
+                    "new_lock_region": new_lock,
+                    "jwt": jwt2,
+                    "developer": DEVELOPER}
+
+        login_data = {
+            "account_uid":     parsed.get(1),
+            "account_name":    parsed.get(4),
+            "region":          parsed.get(3),
+            "online_ip_port":  parsed.get(14),
+            "clan_id":         parsed.get(20),
+            "account_ip_port": parsed.get(32),
+        }
 
         ok = bool(new_lock) and str(new_lock).upper() == target
         return {
             "success": ok,
             "message": (f"Region bound to {target}" if ok
                         else f"lock_region={new_lock!r} (expected {target})"),
-            "target_region": target,
-            "previous_region": current_lock,
+            "target_region":   target,
+            "previous_region": previous_region,
             "new_lock_region": new_lock,
-            "uid": uid,
-            "jwt": new_jwt,
-            "login_data": verified,
-            "developer": DEVELOPER,
+            "uid":             uid,
+            "jwt":             jwt2,
+            "login_data":      login_data,
+            "developer":       DEVELOPER,
         }
 
     except BaseException as e:
         return {"success": False,
                 "error": f"unexpected_exception: {type(e).__name__}: {e}",
-                "stage": "top_level", "developer": DEVELOPER}
+                "stage": "top_level",
+                "developer": DEVELOPER}
     finally:
         try:
             if session is not None:
                 session.close()
         except BaseException:
             pass
+
 
 # ============================================================
 # HTTP handler
@@ -647,117 +717,110 @@ class handler(BaseHTTPRequestHandler):
             return ""
 
     def _handle(self):
-    # ⚡ reset the per-request timer
-    _reset_timer()
+        # ⚡ reset per-request timer
+        _reset_timer()
 
-    # ---- 1) parse URL ----
-    raw_path = "/"
-    params = {}
-    try:
-        parsed = urlparse(self.path or "/")
-        raw_path = parsed.path or "/"
-        params = {k: v[0] for k, v in parse_qs(parsed.query or "").items()}
-    except BaseException:
-        raw_path, params = "/", {}
-
-    # ---- 2) merge POST body ----
-    if self.command in ("POST", "PUT", "PATCH"):
-        raw_s = self._read_body()
-        if raw_s.strip():
-            try:
-                pj = json.loads(raw_s)
-                if isinstance(pj, dict):
-                    params.update(pj)
-            except BaseException:
-                try:
-                    params.update({k: v[0] for k, v in parse_qs(raw_s).items()})
-                except BaseException:
-                    pass
-
-    # ---- 3) normalize inputs FIRST ----
-    try:
-        uid = str(params.get("uid", "") or "").strip()
-        password = str(params.get("password", "") or "").strip()
-        region = str(params.get("region", "") or "").strip().upper()
-    except BaseException:
-        uid, password, region = "", "", ""
-
-    if len(uid) > MAX_UID_LEN:       uid = uid[:MAX_UID_LEN]
-    if len(password) > MAX_PWD_LEN:  password = password[:MAX_PWD_LEN]
-    if len(region) > MAX_REGION_LEN: region = region[:MAX_REGION_LEN]
-
-    # ---- 4) recover intended path from Vercel rewrite ----
-    # Vercel rewrites every URL to /index.py, so raw_path is meaningless.
-    path = raw_path.rstrip("/") or "/"
-
-    # explicit override via ?__path=/bind
-    explicit = str(params.pop("__path", "") or "").strip()
-    if explicit:
-        if not explicit.startswith("/"):
-            explicit = "/" + explicit
-        path = explicit.rstrip("/") or "/"
-
-    # Vercel-mangled path → infer from params
-    elif path in ("/index.py", "/index", "/api", "/api/index", "/api/index.py"):
-        if uid or password or region:
-            path = "/bind"
-        else:
-            path = "/"
-
-    # ---- 5) route ----
-    # /bind
-    if path == "/bind":
-        missing = []
-        if not uid:       missing.append("uid")
-        if not password:  missing.append("password")
-        if not region:    missing.append("region")
-
-        if missing:
-            self._send(200, safe_json({
-                "success": False,
-                "error": "missing_parameters",
-                "missing": missing,
-                "required": ["uid", "password", "region"],
-                "developer": DEVELOPER,
-            }))
-            return
-
-        if region not in lAnGuAgE_bY_rEgIoN:
-            self._send(200, safe_json({
-                "success": False,
-                "error": "invalid_region",
-                "given": region,
-                "supported_regions": sorted(lAnGuAgE_bY_rEgIoN.keys()),
-                "developer": DEVELOPER,
-            }))
-            return
-
+        # ---- 1) parse URL ----
+        raw_path = "/"
+        params = {}
         try:
-            result = bind_region(uid, password, region)
-        except BaseException as e:
-            result = {"success": False,
-                      "error": f"bind_region_exception: {type(e).__name__}: {e}",
-                      "developer": DEVELOPER}
+            parsed = urlparse(self.path or "/")
+            raw_path = parsed.path or "/"
+            params = {k: v[0] for k, v in parse_qs(parsed.query or "").items()}
+        except BaseException:
+            raw_path, params = "/", {}
 
-        if not isinstance(result, dict):
-            result = {"success": False,
-                      "error": "invalid_result_shape",
-                      "developer": DEVELOPER}
+        # ---- 2) merge POST body ----
+        if self.command in ("POST", "PUT", "PATCH"):
+            raw_s = self._read_body()
+            if raw_s.strip():
+                try:
+                    pj = json.loads(raw_s)
+                    if isinstance(pj, dict):
+                        params.update(pj)
+                except BaseException:
+                    try:
+                        params.update({k: v[0] for k, v in parse_qs(raw_s).items()})
+                    except BaseException:
+                        pass
 
-        result.setdefault("developer", DEVELOPER)
-        self._send(200, safe_json(result))
-        return
+        # ---- 3) normalize inputs ----
+        try:
+            uid = str(params.get("uid", "") or "").strip()
+            password = str(params.get("password", "") or "").strip()
+            region = str(params.get("region", "") or "").strip().upper()
+        except BaseException:
+            uid, password, region = "", "", ""
 
-    # /
-    if path == "/":
-        self._send(200, safe_json(HOME_INFO, indent=2))
-        return
+        if len(uid) > MAX_UID_LEN:       uid = uid[:MAX_UID_LEN]
+        if len(password) > MAX_PWD_LEN:  password = password[:MAX_PWD_LEN]
+        if len(region) > MAX_REGION_LEN: region = region[:MAX_REGION_LEN]
 
-    # anything else
-    self._send(200, safe_json({
-        "success": False,
-        "error": "unknown_endpoint",
-        "given": raw_path,
-        "valid_endpoints": {"home": "/", "bind": "/bind"},
-        "developer": DEVELOPER,
-    }))
+        # ---- 4) recover intended path (Vercel rewrites → /index.py) ----
+        path = raw_path.rstrip("/") or "/"
+
+        explicit = str(params.pop("__path", "") or "").strip()
+        if explicit:
+            if not explicit.startswith("/"):
+                explicit = "/" + explicit
+            path = explicit.rstrip("/") or "/"
+        elif path in ("/index.py", "/index", "/api", "/api/index", "/api/index.py"):
+            if uid or password or region:
+                path = "/bind"
+            else:
+                path = "/"
+
+        # ---- 5) route ----
+        if path == "/bind":
+            missing = []
+            if not uid:       missing.append("uid")
+            if not password:  missing.append("password")
+            if not region:    missing.append("region")
+
+            if missing:
+                self._send(200, safe_json({
+                    "success": False,
+                    "error": "missing_parameters",
+                    "missing": missing,
+                    "required": ["uid", "password", "region"],
+                    "developer": DEVELOPER,
+                }))
+                return
+
+            if region not in lAnGuAgE_bY_rEgIoN:
+                self._send(200, safe_json({
+                    "success": False,
+                    "error": "invalid_region",
+                    "given": region,
+                    "supported_regions": sorted(lAnGuAgE_bY_rEgIoN.keys()),
+                    "developer": DEVELOPER,
+                }))
+                return
+
+            try:
+                result = bind_region(uid, password, region)
+            except BaseException as e:
+                result = {"success": False,
+                          "error": f"bind_region_exception: {type(e).__name__}: {e}",
+                          "developer": DEVELOPER}
+
+            if not isinstance(result, dict):
+                result = {"success": False,
+                          "error": "invalid_result_shape",
+                          "developer": DEVELOPER}
+
+            result.setdefault("developer", DEVELOPER)
+            self._send(200, safe_json(result))
+            return
+
+        if path == "/":
+            self._send(200, safe_json(HOME_INFO, indent=2))
+            return
+
+        self._send(200, safe_json({
+            "success": False,
+            "error": "unknown_endpoint",
+            "given": raw_path,
+            "valid_endpoints": {"home": "/", "bind": "/bind"},
+            "developer": DEVELOPER,
+        }))
