@@ -69,7 +69,7 @@ HOME_INFO = {
                 },
             },
             "curl": (
-                "curl -X POST 'https://YOUR_DOMAIN/bind' "
+                "curl -X POST 'https://divan-activator.vercel.app/bind' "
                 "-H 'Content-Type: application/json' "
                 "-d '{\"uid\":\"YOUR_UID\",\"password\":\"YOUR_PASSWORD\",\"region\":\"IND\"}'"
             ),
