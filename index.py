@@ -647,88 +647,117 @@ class handler(BaseHTTPRequestHandler):
             return ""
 
     def _handle(self):
-        # ⚡ KEY FIX: reset the timer on every request
-        _reset_timer()
+    # ⚡ reset the per-request timer
+    _reset_timer()
 
-        path = "/"
-        params = {}
-        try:
-            parsed = urlparse(self.path or "/")
-            path = (parsed.path or "/").rstrip("/") or "/"
-            params = {k: v[0] for k, v in parse_qs(parsed.query or "").items()}
-        except BaseException:
-            path, params = "/", {}
+    # ---- 1) parse URL ----
+    raw_path = "/"
+    params = {}
+    try:
+        parsed = urlparse(self.path or "/")
+        raw_path = parsed.path or "/"
+        params = {k: v[0] for k, v in parse_qs(parsed.query or "").items()}
+    except BaseException:
+        raw_path, params = "/", {}
 
-        if self.command in ("POST", "PUT", "PATCH"):
-            raw_s = self._read_body()
-            if raw_s.strip():
-                try:
-                    pj = json.loads(raw_s)
-                    if isinstance(pj, dict):
-                        params.update(pj)
-                except BaseException:
-                    try:
-                        params.update({k: v[0] for k, v in parse_qs(raw_s).items()})
-                    except BaseException:
-                        pass
-
-        try:
-            uid = str(params.get("uid", "") or "").strip()
-            password = str(params.get("password", "") or "").strip()
-            region = str(params.get("region", "") or "").strip().upper()
-        except BaseException:
-            uid, password, region = "", "", ""
-
-        if len(uid) > MAX_UID_LEN:      uid = uid[:MAX_UID_LEN]
-        if len(password) > MAX_PWD_LEN: password = password[:MAX_PWD_LEN]
-        if len(region) > MAX_REGION_LEN: region = region[:MAX_REGION_LEN]
-
-        # ---- /bind ----
-        if path == "/bind":
-            missing = []
-            if not uid:      missing.append("uid")
-            if not password: missing.append("password")
-            if not region:   missing.append("region")
-            if missing:
-                self._send(200, safe_json({
-                    "success": False, "error": "missing_parameters",
-                    "missing": missing,
-                    "required": ["uid", "password", "region"],
-                    "developer": DEVELOPER,
-                }))
-                return
-
-            if region not in lAnGuAgE_bY_rEgIoN:
-                self._send(200, safe_json({
-                    "success": False, "error": "invalid_region",
-                    "given": region,
-                    "supported_regions": sorted(lAnGuAgE_bY_rEgIoN.keys()),
-                    "developer": DEVELOPER,
-                }))
-                return
-
+    # ---- 2) merge POST body ----
+    if self.command in ("POST", "PUT", "PATCH"):
+        raw_s = self._read_body()
+        if raw_s.strip():
             try:
-                result = bind_region(uid, password, region)
-            except BaseException as e:
-                result = {"success": False,
-                          "error": f"bind_region_exception: {type(e).__name__}: {e}",
-                          "developer": DEVELOPER}
+                pj = json.loads(raw_s)
+                if isinstance(pj, dict):
+                    params.update(pj)
+            except BaseException:
+                try:
+                    params.update({k: v[0] for k, v in parse_qs(raw_s).items()})
+                except BaseException:
+                    pass
 
-            if not isinstance(result, dict):
-                result = {"success": False, "error": "invalid_result_shape",
-                          "developer": DEVELOPER}
+    # ---- 3) normalize inputs FIRST ----
+    try:
+        uid = str(params.get("uid", "") or "").strip()
+        password = str(params.get("password", "") or "").strip()
+        region = str(params.get("region", "") or "").strip().upper()
+    except BaseException:
+        uid, password, region = "", "", ""
 
-            result.setdefault("developer", DEVELOPER)
-            self._send(200, safe_json(result))
+    if len(uid) > MAX_UID_LEN:       uid = uid[:MAX_UID_LEN]
+    if len(password) > MAX_PWD_LEN:  password = password[:MAX_PWD_LEN]
+    if len(region) > MAX_REGION_LEN: region = region[:MAX_REGION_LEN]
+
+    # ---- 4) recover intended path from Vercel rewrite ----
+    # Vercel rewrites every URL to /index.py, so raw_path is meaningless.
+    path = raw_path.rstrip("/") or "/"
+
+    # explicit override via ?__path=/bind
+    explicit = str(params.pop("__path", "") or "").strip()
+    if explicit:
+        if not explicit.startswith("/"):
+            explicit = "/" + explicit
+        path = explicit.rstrip("/") or "/"
+
+    # Vercel-mangled path → infer from params
+    elif path in ("/index.py", "/index", "/api", "/api/index", "/api/index.py"):
+        if uid or password or region:
+            path = "/bind"
+        else:
+            path = "/"
+
+    # ---- 5) route ----
+    # /bind
+    if path == "/bind":
+        missing = []
+        if not uid:       missing.append("uid")
+        if not password:  missing.append("password")
+        if not region:    missing.append("region")
+
+        if missing:
+            self._send(200, safe_json({
+                "success": False,
+                "error": "missing_parameters",
+                "missing": missing,
+                "required": ["uid", "password", "region"],
+                "developer": DEVELOPER,
+            }))
             return
 
-        # ---- / (home) ----
-        if path == "/":
-            self._send(200, safe_json(HOME_INFO, indent=2))
+        if region not in lAnGuAgE_bY_rEgIoN:
+            self._send(200, safe_json({
+                "success": False,
+                "error": "invalid_region",
+                "given": region,
+                "supported_regions": sorted(lAnGuAgE_bY_rEgIoN.keys()),
+                "developer": DEVELOPER,
+            }))
             return
 
-        self._send(200, safe_json({
-            "success": False, "error": "unknown_endpoint", "given": path,
-            "valid_endpoints": {"home": "/", "bind": "/bind"},
-            "developer": DEVELOPER,
-        }))
+        try:
+            result = bind_region(uid, password, region)
+        except BaseException as e:
+            result = {"success": False,
+                      "error": f"bind_region_exception: {type(e).__name__}: {e}",
+                      "developer": DEVELOPER}
+
+        if not isinstance(result, dict):
+            result = {"success": False,
+                      "error": "invalid_result_shape",
+                      "developer": DEVELOPER}
+
+        result.setdefault("developer", DEVELOPER)
+        self._send(200, safe_json(result))
+        return
+
+    # /
+    if path == "/":
+        self._send(200, safe_json(HOME_INFO, indent=2))
+        return
+
+    # anything else
+    self._send(200, safe_json({
+        "success": False,
+        "error": "unknown_endpoint",
+        "given": raw_path,
+        "valid_endpoints": {"home": "/", "bind": "/bind"},
+        "developer": DEVELOPER,
+    }))
