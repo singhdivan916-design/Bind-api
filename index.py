@@ -1,15 +1,19 @@
+# ============================================================
+# Free Fire Region Binder — v8
+# Token → MajorLogin → ChooseRegion → MajorLogin → GetLoginData
+# ============================================================
 import os
 import json
 import base64
 import time
 import random
-import traceback
 import urllib3
 import requests
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
+from datetime import datetime
 
 try:
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -76,30 +80,39 @@ HOME_INFO = {
         "ME", "IND", "ID", "VN", "TH", "BD",
         "PK", "TW", "CIS", "SAC", "BR",
     ],
+    "flow": [
+        "1. Token grant",
+        "2. MajorLogin (initial) — region lang applied",
+        "3. ChooseRegion (skipped if already on target)",
+        "4. MajorLogin (after choose) — region lang applied",
+        "5. GetLoginData (compulsory) — region lang applied",
+    ],
+    "release_version": "OB55",
+    "client_version":  "1.132.11",
 }
 
 DEVELOPER = HOME_INFO["developer"]
 
 aEs_KeY = bytes([89, 103, 38, 116, 99, 37, 68, 69, 117, 104, 54, 37, 90, 99, 94, 56])
-aEs_Iv = bytes([54, 111, 121, 90, 68, 114, 50, 50, 69, 51, 121, 99, 104, 106, 77, 37])
+aEs_Iv  = bytes([54, 111, 121, 90, 68, 114, 50, 50, 69, 51, 121, 99, 104, 106, 77, 37])
 
 cLiEnT_sEcReT = "2ee44819e9b4598845141067b281621874d0d5d7af9d8f7e00c1e54715b7d1e3"
 aPp_Id = 100067
 
-rElEaSe_TaG = "OB55"
-rUnTiMe_vErSiOn = "2.133.9"
+rElEaSe_TaG     = "OB55"
+rUnTiMe_vErSiOn = "1.132.11"
 
 sErVeR = "https://loginbp.ppmainecoonghj.com/"
-cLiEnT_IND = "https://client.ind.freefiremobile.com/"
-cLiEnT_US = "https://client.us.freefiremobile.com/"
-cLiEnT_GLOBAL = "https://clientbp.ppmainecoonghj.com/"
-
 oAuTh_ToKeN = "https://100067.connect.garena.com/oauth/guest/token/grant"
+
+cLiEnT_IND    = "https://client.ind.freefiremobile.com/"
+cLiEnT_US     = "https://client.us.freefiremobile.com/"
+cLiEnT_GLOBAL = "https://clientbp.ppmainecoonghj.com/"
 
 lAnGuAgE_bY_rEgIoN = {
     "ME": "ar", "IND": "hi", "ID": "id", "VN": "vi", "TH": "th",
     "BD": "bn", "PK": "ur", "TW": "zh", "CIS": "ru",
-    "SAC": "es", "BR": "pt",
+    "SAC": "es", "BR": "pt-br",
 }
 aMeRiCaN_rEgIoNs = {"BR", "SAC"}
 
@@ -142,10 +155,7 @@ def safe_json(obj, **kw):
         try:
             return json.dumps(obj, ensure_ascii=True, default=str, **kw)
         except Exception:
-            try:
-                return json.dumps({"success": False, "error": "serialization_failed"})
-            except Exception:
-                return '{"success":false}'
+            return '{"success":false}'
 
 
 def wRiTe_vArInT(vAlUe):
@@ -276,10 +286,6 @@ def gA_sV():
         return "0"
 
 
-def server_endpoint(_region):
-    return sErVeR
-
-
 def client_endpoint(region):
     try:
         c = str(region).upper()
@@ -290,6 +296,143 @@ def client_endpoint(region):
     if c in aMeRiCaN_rEgIoNs:
         return cLiEnT_US
     return cLiEnT_GLOBAL
+
+
+def region_language(region):
+    try:
+        r = str(region).upper()
+    except Exception:
+        return "en"
+    return lAnGuAgE_bY_rEgIoN.get(r, "en")
+
+
+def _extract_field_str(raw, field_no):
+    if not raw:
+        return None
+    try:
+        pos, n = 0, len(raw)
+
+        def read_varint(buf, p):
+            res, sh = 0, 0
+            while p < len(buf) and sh < 64:
+                b = buf[p]
+                p += 1
+                res |= (b & 0x7F) << sh
+                if not (b & 0x80):
+                    return res, p
+                sh += 7
+            raise ValueError("bad_varint")
+
+        while pos < n:
+            key, pos = read_varint(raw, pos)
+            fn = key >> 3
+            wt = key & 0x07
+            if fn == 0:
+                return None
+            if wt == 0:
+                _, pos = read_varint(raw, pos)
+            elif wt == 2:
+                ln, pos = read_varint(raw, pos)
+                if pos + ln > n:
+                    return None
+                val = raw[pos:pos + ln]
+                pos += ln
+                if fn == field_no:
+                    try:
+                        return val.decode("utf-8")
+                    except Exception:
+                        return None
+            elif wt == 5:
+                pos += 4
+                if pos > n:
+                    return None
+            elif wt == 1:
+                pos += 8
+                if pos > n:
+                    return None
+            else:
+                return None
+        return None
+    except Exception:
+        return None
+
+
+def _find_proto_offset(content):
+    if not content:
+        return 0
+    for off in range(0, min(120, len(content))):
+        fa = _extract_field_str(content[off:], 14)
+        if fa and ":" in fa:
+            return off
+    return 0
+
+
+def major_login_body(access_token, open_id, platform_type, region, ip):
+    language = region_language(region)
+    memory_available_inner = fIeLd_iNt(6, 55) + fIeLd_iNt(8, 81)
+
+    return {
+        3: time.strftime("%Y-%m-%d %H:%M:%S"),
+        4: "free fire",
+        5: 1,
+        7: rUnTiMe_vErSiOn,
+        8: "Android OS 15 / API-35 (AP3A.240905.015.A2/185014)",
+        9: "Handheld",
+        10: "TUNTEL",
+        11: "WIFI",
+        12: 1600,
+        13: 719,
+        14: "234",
+        15: "ARM64 FP ASIMD AES | 1820 | 8",
+        16: 2798,
+        17: "Mali-G57",
+        18: "OpenGL ES 3.2 v1.r49p1-04eac0.2848c17a2fd4e9340e06555168eaa3c9",
+        19: "Google|f744e396-5694-4e65-995d-97a958f2bd1f",
+        20: ip,
+        21: language,
+        22: open_id,
+        23: "4",
+        24: "Handheld",
+        25: memory_available_inner,
+        29: access_token,
+        30: 1,
+        41: "TUNTEL",
+        42: "WIFI",
+        57: "7428b253defc164018c604a1ebbfebdf",
+        60: 49973,
+        61: 11338,
+        62: 854,
+        63: 11466,
+        64: 11466,
+        65: 49973,
+        66: 11466,
+        67: 49973,
+        73: 2,
+        74: "/data/app/~~lHFxTCCbupG2QVJmsURtZw==/com.dts.freefireth-N3aCHpHNXpdxjD80uIIbww==/lib/arm64",
+        76: 1,
+        77: "b8e0cd5e295eee42f5860d3c86e483dd|/data/app/~~lHFxTCCbupG2QVJmsURtZw==/com.dts.freefireth-N3aCHpHNXpdxjD80uIIbww==/base.apk",
+        78: 3,
+        79: 2,
+        81: "64",
+        83: "2019121229",
+        86: "OpenGLES2",
+        87: 8191,
+        88: 4,
+        92: 15078,
+        93: "android",
+        94: "KqsHTx3+QOmBRR1WKvaWewlcpqJBfjki+PPHQoQG8+0yV+Uos7gUFFjHMQ/e7u6han6Fl77r7c3vMN3p8UbKgN+nfycQCgwBmWgBzomx2gj84c+p",
+        95: 111207,
+        96: '{"cur_rate":[90,60,120],"support_etc2":false}',
+        97: 1,
+        98: 0,
+        99: "4",
+        100: "4",
+        102: b"\x17]ENWU\x0eR5",
+        104: 52882,
+        105: 1,
+        106: "https://dl.ak.freefiremobile.com/live/ABHotUpdates/|https://core-ak.freefiremobile.com/live/ABHotUpdates/|6b2078db9d22dd98f8e9386a39af8462",
+        107: "c8e41b7a93f02d56e1a94c7b8203f5d1",
+    }
 
 
 def request_token(session, uid, password, user_agent):
@@ -322,48 +465,11 @@ def request_token(session, uid, password, user_agent):
     return str(at), str(oid)
 
 
-def major_login_body(access_token, open_id, platform_type, region, ip):
-    region_s = str(region).upper()
-    return {
-        3: time.strftime("%Y-%m-%d %H:%M:%S"),
-        4: "free fire", 5: 1, 7: rUnTiMe_vErSiOn,
-        8: "Android OS 10 / API-29 (QP1A.190711.020/1617006012)",
-        9: "Handheld", 10: "Vi India", 11: "WIFI",
-        12: 1600, 13: 720, 14: "320",
-        15: "ARM64 FP ASIMD AES | 2301 | 8", 16: 2799,
-        17: "PowerVR Rogue GE8320",
-        18: "OpenGL ES 3.2 build 1.11@5425693",
-        19: "Google|9f7d6b8b-b10c-454a-852d-06332cd498eb",
-        20: ip, 21: lAnGuAgE_bY_rEgIoN.get(region_s, "en"),
-        22: open_id, 23: str(platform_type),
-        24: "Handheld", 25: "realme RMX2189", 26: region_s,
-        29: access_token, 30: 1,
-        41: "Vi India", 42: "WIFI",
-        57: "1ac4b80ecf0478a44203bf8fac6120f5",
-        60: 19799, 61: 2536, 62: 5056, 64: 2768,
-        65: 19999, 66: 2536, 67: 19799,
-        73: 1,
-        74: "/data/app/com.dts.freefiremax-ShI7E0dK8p1IiZ785pvuVQ==/lib/arm64",
-        76: 2,
-        77: "38f4751a330688ab124c2c804cec90a5|/data/app/com.dts.freefiremax-ShI7E0dK8p1IiZ785pvuVQ==/base.apk",
-        78: 2, 79: 2, 81: "64", 83: "2019118527",
-        86: "OpenGLES3", 87: 3071, 88: 4,
-        92: 67920, 93: "android_max",
-        94: "KqsHT+UrR1HKqb6+1db+Ofei+NtZr2+hbiBo3yKDL8w+8E3S5qF2IgEEe1fFQFyHRzl4iyHjHp+QsfeLbjJ6+DidTiKxm0ak2uYYa6QR4nAUdlZR",
-        95: 111107,
-        96: '{"cur_rate":null,"support_etc2":true}',
-        97: 1, 98: 1, 99: "4", 100: "4", 102: "",
-        104: 83812, 105: 1,
-        106: "https://dl-bs.ggpolarbear.com/live/ABHotUpdates/|https://core-bs.ggpolarbear.com/live/ABHotUpdates/|a4332cb1c1a84e51dd77441e4856ed5a",
-        107: "1.9393e7b8e53e8aeb",
-    }
-
-
 def send_major_login(session, access_token, open_id, platform_type=4, user_agent=None, region="IND"):
     to = _call_timeout(20.0)
     if to is None:
         raise Exception("timeout")
-    url = server_endpoint(region) + "MajorLogin"
+    url = sErVeR + "MajorLogin"
     host = url.split("/")[2] if "//" in url else url
     body = major_login_body(access_token, open_id, platform_type, region,
                             safe_choice(iP_aDdReSsEs, "151.158.158.220"))
@@ -393,7 +499,7 @@ def send_choose_region(session, region, jwt, user_agent=None):
     to = _call_timeout(15.0)
     if to is None:
         raise Exception("timeout")
-    url = server_endpoint(region) + "ChooseRegion"
+    url = sErVeR + "ChooseRegion"
     host = url.split("/")[2] if "//" in url else url
     target = "RU" if str(region).upper() == "CIS" else str(region).upper()
     enc = eNcRyPt_aEs(aSsEmBlE_pRoTo({1: target}))
@@ -413,84 +519,65 @@ def send_choose_region(session, region, jwt, user_agent=None):
     return session.post(url, data=enc, headers=headers, timeout=to, verify=False)
 
 
-def get_login_data_body(access_token, open_id, platform, region, ip):
-    region_s = str(region).upper()
-    now = time.strftime("%Y-%m-%d %H:%M:%S")
-    return {
-        3: now, 4: "free fire", 5: 1, 7: rUnTiMe_vErSiOn,
-        8: "Android OS 10 / API-29 (QP1A.190711.020/1617006012)",
-        9: "Handheld", 10: "Vi India", 11: "WIFI",
-        12: 1600, 13: 720, 14: "320",
-        15: "ARM64 FP ASIMD AES | 2301 | 8", 16: 2799,
-        17: "PowerVR Rogue GE8320",
-        18: "OpenGL ES 3.2 build 1.11@5425693",
-        19: "Google|9f7d6b8b-b10c-454a-852d-06332cd498eb",
-        20: ip, 21: lAnGuAgE_bY_rEgIoN.get(region_s, "en"),
-        22: open_id, 23: str(platform),
-        24: "Handheld", 25: "realme RMX2189", 26: region_s,
-        29: access_token, 30: 1,
-        41: "Vi India", 42: "WIFI",
-        57: "1ac4b80ecf0478a44203bf8fac6120f5",
-        60: 19799, 61: 2536, 62: 5056, 64: 2768,
-        65: 19999, 66: 2536, 67: 19799,
-        73: 1,
-        74: "/data/app/com.dts.freefiremax-ShI7E0dK8p1IiZ785pvuVQ==/lib/arm64",
-        76: 2,
-        77: "38f4751a330688ab124c2c804cec90a5|/data/app/com.dts.freefiremax-ShI7E0dK8p1IiZ785pvuVQ==/base.apk",
-        78: 2, 79: 2, 81: "64", 83: "2019118527",
-        86: "OpenGLES3", 87: 3071, 88: 4,
-        92: 67920, 93: "android_max",
-        94: "KqsHT+UrR1HKqb6+1db+Ofei+NtZr2+hbiBo3yKDL8w+8E3S5qF2IgEEe1fFQFyHRzl4iyHjHp+QsfeLbjJ6+DidTiKxm0ak2uYYa6QR4nAUdlZR",
-        95: 111107,
-        96: '{"cur_rate":null,"support_etc2":true}',
-        97: 1, 98: 1, 99: "4", 100: "4", 102: "",
-        104: 83812, 105: 1,
-        106: "https://dl-bs.ggpolarbear.com/live/ABHotUpdates/|https://core-bs.ggpolarbear.com/live/ABHotUpdates/|a4332cb1c1a84e51dd77441e4856ed5a",
-        107: "1.9393e7b8e53e8aeb",
-    }
-
-
-def send_get_login_data(session, jwt, access_token, open_id, platform="4", region="IND", user_agent=None):
-    to = _call_timeout(10.0)
+def send_get_login_data(session, base_url, jwt, body_payload, user_agent=None):
+    to = _call_timeout(15.0)
     if to is None:
         raise Exception("timeout")
-    url = client_endpoint(region) + "GetLoginData"
+
+    url = base_url.rstrip("/") + "/GetLoginData"
     host = url.split("/")[2] if "//" in url else url
-    enc = eNcRyPt_aEs(aSsEmBlE_pRoTo(get_login_data_body(
-        access_token, open_id, platform, region,
-        safe_choice(iP_aDdReSsEs, "151.158.158.220")
-    )))
+
     headers = {
         "Host": host,
-        "User-Agent": user_agent or "UnityPlayer/2022.3.47f1 (UnityWebRequest/1.0, libcurl/8.5.0-DEV)",
-        "Accept": "*/*",
-        "Accept-Encoding": "deflate, gzip",
-        "Authorization": f"Bearer {jwt}",
+        "User-Agent": user_agent or "UnityPlayer/2018.4.12f1 (UnityWebRequest/1.0, libcurl/8.5.0-DEV)",
+        "Accept-Encoding": "gzip",
+        "Expect": "100-continue",
+        "Content-Type": "application/x-www-form-urlencoded",
+        "X-Unity-Version": "2018.4.12f1",
+        "X-GA-SV": "1789535859",
         "X-GA": "v1 1",
         "ReleaseVersion": rElEaSe_TaG,
-        "Content-Type": "application/octet-stream",
-        "X-Unity-Version": "2022.3.47f1",
+        "Authorization": f"Bearer {jwt}",
     }
-    r = session.post(url, headers=headers, data=enc, verify=False, timeout=to)
-    return r.status_code, r.content
 
+    r = session.post(url, data=body_payload, headers=headers, timeout=to, verify=False)
+    if r.status_code != 200:
+        raise Exception(f"http_{r.status_code}")
 
-def parse_get_login_data(data):
-    p = pArSe_pRoTo(data)
+    content = r.content
+    if not content:
+        raise Exception("empty_response")
+
+    offset = _find_proto_offset(content)
+    blob = content[offset:] if offset else content
+
+    fa = _extract_field_str(blob, 14)
+    ia = _extract_field_str(blob, 32)
+
+    if not fa or not ia:
+        for off in range(0, min(120, len(content))):
+            f = _extract_field_str(content[off:], 14)
+            i = _extract_field_str(content[off:], 32)
+            if f and ":" in f and i and ":" in i:
+                fa, ia = f, i
+                break
+
+    parsed = pArSe_pRoTo(blob)
+
     return {
-        "account_uid":     p.get(1, 0),
-        "region":          p.get(3, ""),
-        "account_name":    p.get(4, ""),
-        "online_ip_port":  p.get(14, ""),
-        "clan_id":         p.get(20, 0),
-        "account_ip_port": p.get(32, ""),
+        "functional_addrs":    fa or parsed.get(14),
+        "informational_addrs": ia or parsed.get(32),
+        "account_uid":         parsed.get(1),
+        "region":              parsed.get(3),
+        "nickname":            parsed.get(4),
+        "level":               parsed.get(6, 1),
+        "exp":                 parsed.get(7, 0),
     }
 
 
-def _run_bind(uid, password, region, force=False):
+def bind_region(uid, password, region, force=False):
     region = str(region).upper()
     session = None
-    trace = {}
     try:
         session = requests.Session()
         try:
@@ -503,19 +590,13 @@ def _run_bind(uid, password, region, force=False):
 
         try:
             access_token, open_id = request_token(session, uid, password, mSDK_ua)
-        except Exception as e:
-            trace["stage"] = "token"
-            trace["reason"] = str(e)
-            return ({"success": False, "error": "auth_failed",
-                     "developer": DEVELOPER}, trace)
+        except Exception:
+            return {"success": False, "error": "auth_failed", "developer": DEVELOPER}
 
         try:
             login1 = send_major_login(session, access_token, open_id, 4, unity_ua, region)
-        except Exception as e:
-            trace["stage"] = "major_login_initial"
-            trace["reason"] = str(e)
-            return ({"success": False, "error": "login_failed",
-                     "developer": DEVELOPER}, trace)
+        except Exception:
+            return {"success": False, "error": "login_failed", "developer": DEVELOPER}
 
         jwt1 = login1.get(8)
         if isinstance(jwt1, bytes):
@@ -524,59 +605,32 @@ def _run_bind(uid, password, region, force=False):
             except Exception:
                 jwt1 = ""
         if not jwt1:
-            trace["stage"] = "major_login_initial"
-            trace["reason"] = "no_jwt"
-            return ({"success": False, "error": "login_failed",
-                     "developer": DEVELOPER}, trace)
+            return {"success": False, "error": "login_failed", "developer": DEVELOPER}
 
         target = "RU" if region == "CIS" else region
         previous_region = jWt_ReGiOn(jwt1)
         already_on_target = bool(previous_region) and str(previous_region).upper() == target
 
-        trace["previous_region"] = previous_region
-        trace["target_region"] = target
-        trace["already_on_target"] = already_on_target
-
         choose_ok = False
         choose_skipped = False
-        choose_status = None
-        choose_body = None
 
         if already_on_target and not force:
             choose_skipped = True
-            trace["choose_region"] = "skipped"
         else:
             try:
                 cr = send_choose_region(session, region, jwt1, unity_ua)
-                choose_status = getattr(cr, "status_code", 0)
-                trace["choose_region_status"] = choose_status
-                try:
-                    choose_body = (cr.text or "")[:400] if hasattr(cr, "text") else None
-                except Exception:
-                    choose_body = None
-                if choose_status == 200:
+                if getattr(cr, "status_code", 0) == 200:
                     choose_ok = True
-                    trace["choose_region"] = "ok"
-                else:
-                    trace["choose_region"] = "failed"
-                    if choose_body:
-                        trace["choose_region_body"] = choose_body
-            except Exception as e:
-                trace["choose_region"] = "exception"
-                trace["choose_region_reason"] = str(e)[:200]
+            except Exception:
+                pass
 
         if not choose_ok and not choose_skipped and not already_on_target:
-            trace["stage"] = "choose_region"
-            return ({"success": False, "error": "region_bind_rejected",
-                     "developer": DEVELOPER}, trace)
+            return {"success": False, "error": "region_bind_rejected", "developer": DEVELOPER}
 
         try:
             login2 = send_major_login(session, access_token, open_id, 4, unity_ua, region)
-        except Exception as e:
-            trace["stage"] = "major_login_after_choose"
-            trace["reason"] = str(e)
-            return ({"success": False, "error": "login_failed",
-                     "developer": DEVELOPER}, trace)
+        except Exception:
+            return {"success": False, "error": "login_failed", "developer": DEVELOPER}
 
         jwt2 = login2.get(8)
         if isinstance(jwt2, bytes):
@@ -585,66 +639,45 @@ def _run_bind(uid, password, region, force=False):
             except Exception:
                 jwt2 = ""
         if not jwt2:
-            trace["stage"] = "major_login_after_choose"
-            trace["reason"] = "no_jwt"
-            return ({"success": False, "error": "login_failed",
-                     "developer": DEVELOPER}, trace)
+            return {"success": False, "error": "login_failed", "developer": DEVELOPER}
+
+        client_url = None
+        v = login2.get(10) if isinstance(login2, dict) else None
+        if isinstance(v, str) and v.startswith("http"):
+            client_url = v
+        if not client_url:
+            client_url = client_endpoint(region)
+
+        ip = safe_choice(iP_aDdReSsEs, "151.158.158.220")
+        getlogin_payload = major_login_body(access_token, open_id, 4, region, ip)
+        getlogin_enc = eNcRyPt_aEs(aSsEmBlE_pRoTo(getlogin_payload))
+
+        try:
+            login_data = send_get_login_data(session, client_url, jwt2, getlogin_enc, unity_ua)
+        except Exception:
+            return {"success": False, "error": "login_data_failed", "developer": DEVELOPER}
+
+        if not login_data or not login_data.get("functional_addrs"):
+            return {"success": False, "error": "login_data_failed", "developer": DEVELOPER}
 
         new_lock = jWt_ReGiOn(jwt2)
-        trace["new_lock_region"] = new_lock
         ok = bool(new_lock) and str(new_lock).upper() == target
 
-        try:
-            st, content = send_get_login_data(
-                session, jwt2, access_token, open_id,
-                platform="4", region=region, user_agent=unity_ua
-            )
-        except Exception as e:
-            trace["stage"] = "get_login_data"
-            trace["reason"] = str(e)
-            return ({"success": False, "error": "login_data_fetch_failed",
-                     "developer": DEVELOPER}, trace)
+        if ok:
+            return {
+                "success":    True,
+                "message":    "region updated successfully",
+                "region":     target,
+                "uid":        uid,
+                "jwt":        jwt2,
+                "login_data": login_data,
+                "developer":  DEVELOPER,
+            }
 
-        trace["get_login_data_status"] = st
-        if st != 200:
-            try:
-                trace["get_login_data_body"] = content.decode("utf-8", errors="ignore")[:400]
-            except Exception:
-                pass
-            trace["stage"] = "get_login_data"
-            return ({"success": False, "error": "login_data_fetch_failed",
-                     "developer": DEVELOPER}, trace)
+        return {"success": False, "error": "region_bind_rejected", "developer": DEVELOPER}
 
-        try:
-            login_data = parse_get_login_data(content)
-        except Exception as e:
-            trace["stage"] = "get_login_data"
-            trace["reason"] = f"parse: {e}"
-            return ({"success": False, "error": "login_data_fetch_failed",
-                     "developer": DEVELOPER}, trace)
-
-        trace["login_data"] = login_data
-        trace["final_ok"] = ok
-
-        if not ok:
-            return ({"success": False, "error": "region_bind_rejected",
-                     "developer": DEVELOPER}, trace)
-
-        return ({
-            "success": True,
-            "message": "region updated successfully",
-            "region": target,
-            "uid": uid,
-            "jwt": jwt2,
-            "login_data": login_data,
-            "developer": DEVELOPER,
-        }, trace)
-
-    except BaseException as e:
-        trace["stage"] = "internal"
-        trace["reason"] = f"{type(e).__name__}: {e}"
-        return ({"success": False, "error": "internal_error",
-                 "developer": DEVELOPER}, trace)
+    except BaseException:
+        return {"success": False, "error": "internal_error", "developer": DEVELOPER}
     finally:
         try:
             if session is not None:
@@ -766,15 +799,11 @@ class handler(BaseHTTPRequestHandler):
         except BaseException:
             uid, password, region = "", "", ""
 
-        if len(uid) > MAX_UID_LEN:
-            uid = uid[:MAX_UID_LEN]
-        if len(password) > MAX_PWD_LEN:
-            password = password[:MAX_PWD_LEN]
-        if len(region) > MAX_REGION_LEN:
-            region = region[:MAX_REGION_LEN]
+        if len(uid) > MAX_UID_LEN:       uid = uid[:MAX_UID_LEN]
+        if len(password) > MAX_PWD_LEN:  password = password[:MAX_PWD_LEN]
+        if len(region) > MAX_REGION_LEN: region = region[:MAX_REGION_LEN]
 
         force = str(params.get("force", "") or "").strip().lower() in ("1", "true", "yes")
-        debug = str(params.get("debug", "") or "").strip().lower() in ("1", "true", "yes")
 
         path = raw_path.rstrip("/") or "/"
         explicit = str(params.pop("__path", "") or "").strip()
@@ -787,12 +816,9 @@ class handler(BaseHTTPRequestHandler):
 
         if path == "/bind":
             missing = []
-            if not uid:
-                missing.append("uid")
-            if not password:
-                missing.append("password")
-            if not region:
-                missing.append("region")
+            if not uid:       missing.append("uid")
+            if not password:  missing.append("password")
+            if not region:    missing.append("region")
 
             if missing:
                 self._send(200, safe_json({
@@ -813,24 +839,15 @@ class handler(BaseHTTPRequestHandler):
                 return
 
             try:
-                public_result, trace = _run_bind(uid, password, region, force=force)
+                result = bind_region(uid, password, region, force=force)
             except BaseException:
-                public_result = {"success": False,
-                                 "error": "internal_error",
-                                 "developer": DEVELOPER}
-                trace = {}
+                result = {"success": False, "error": "internal_error", "developer": DEVELOPER}
 
-            if not isinstance(public_result, dict):
-                public_result = {"success": False,
-                                 "error": "internal_error",
-                                 "developer": DEVELOPER}
+            if not isinstance(result, dict):
+                result = {"success": False, "error": "internal_error", "developer": DEVELOPER}
 
-            public_result.setdefault("developer", DEVELOPER)
-
-            if debug:
-                public_result["_trace"] = trace
-
-            self._send(200, safe_json(public_result))
+            result.setdefault("developer", DEVELOPER)
+            self._send(200, safe_json(result))
             return
 
         if path == "/":
