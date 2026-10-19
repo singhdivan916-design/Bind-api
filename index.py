@@ -1,6 +1,5 @@
 # ============================================================
-# Free Fire Region Binder — v8
-# Token → MajorLogin → ChooseRegion → MajorLogin → GetLoginData
+# Free Fire Region Binder
 # ============================================================
 import os
 import json
@@ -80,15 +79,6 @@ HOME_INFO = {
         "ME", "IND", "ID", "VN", "TH", "BD",
         "PK", "TW", "CIS", "SAC", "BR",
     ],
-    "flow": [
-        "1. Token grant",
-        "2. MajorLogin (initial) — region lang applied",
-        "3. ChooseRegion (skipped if already on target)",
-        "4. MajorLogin (after choose) — region lang applied",
-        "5. GetLoginData (compulsory) — region lang applied",
-    ],
-    "release_version": "OB55",
-    "client_version":  "1.132.11",
 }
 
 DEVELOPER = HOME_INFO["developer"]
@@ -570,12 +560,10 @@ def send_get_login_data(session, base_url, jwt, body_payload, user_agent=None):
         "account_uid":         parsed.get(1),
         "region":              parsed.get(3),
         "nickname":            parsed.get(4),
-        "level":               parsed.get(6, 1),
-        "exp":                 parsed.get(7, 0),
     }
 
 
-def bind_region(uid, password, region, force=False):
+def _execute(uid, password, region, force=False):
     region = str(region).upper()
     session = None
     try:
@@ -839,7 +827,7 @@ class handler(BaseHTTPRequestHandler):
                 return
 
             try:
-                result = bind_region(uid, password, region, force=force)
+                result = _execute(uid, password, region, force=force)
             except BaseException:
                 result = {"success": False, "error": "internal_error", "developer": DEVELOPER}
 
