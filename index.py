@@ -1,7 +1,8 @@
 # ============================================================
-# Bulletproof Free Fire Region Binder
-# Every request → 200 + JSON. Never crash. Never 4xx/5xx.
+# Bulletproof Free Fire Region Binder — v2 (per-request timer)
+# Every request → 200 + JSON. Never crash. Never preemptively skip.
 # ============================================================
+import os
 import json
 import base64
 import time
@@ -14,31 +15,37 @@ from Crypto.Util.Padding import pad
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
-# ---- global time budget (Vercel Hobby = 10s) ----
-_REQUEST_START = time.time()
-_TOTAL_BUDGET = 8.5
-_MIN_CALL_BUDGET = 1.2
-
-def _time_left():
-    try:
-        return _TOTAL_BUDGET - (time.time() - _REQUEST_START)
-    except Exception:
-        return 0.0
-
-def _call_timeout(desired=8.0):
-    """Return per-call timeout, or None if we shouldn't even try."""
-    try:
-        left = _time_left()
-        if left < _MIN_CALL_BUDGET:
-            return None
-        return max(1.0, min(desired, left - 0.4))
-    except Exception:
-        return None
-
 try:
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 except Exception:
     pass
+
+# ---- per-request budget (reset in _handle) ----
+# Hobby-safe default = 9s. For Vercel Pro (60s maxDuration), set env:
+#   FF_TIME_BUDGET = "55"
+TOTAL_BUDGET = float(os.environ.get("FF_TIME_BUDGET", "9"))
+_MIN_CALL_BUDGET = 2.0
+_REQUEST_START = time.time()   # overwritten per request
+
+def _reset_timer():
+    global _REQUEST_START
+    _REQUEST_START = time.time()
+
+def _time_left():
+    try:
+        return TOTAL_BUDGET - (time.time() - _REQUEST_START)
+    except Exception:
+        return 0.0
+
+def _call_timeout(desired=15.0):
+    """Return per-call timeout, or None only if truly no time left."""
+    try:
+        left = _time_left()
+        if left < _MIN_CALL_BUDGET:
+            return None
+        return max(2.0, min(desired, left - 1.0))
+    except Exception:
+        return None
 
 # ============================================================
 # Home info
@@ -66,7 +73,7 @@ HOME_INFO = {
                 },
             },
             "curl": (
-                "curl -X POST 'https://divan-activator.vercel.app/bind' "
+                "curl -X POST 'https://YOUR_DOMAIN/bind' "
                 "-H 'Content-Type: application/json' "
                 "-d '{\"uid\":\"YOUR_UID\",\"password\":\"YOUR_PASSWORD\",\"region\":\"IND\"}'"
             ),
@@ -75,6 +82,10 @@ HOME_INFO = {
     "supported_regions": [
         "ME", "IND", "ID", "VN", "TH", "BD",
         "PK", "TW", "CIS", "SAC", "BR",
+    ],
+    "notes": [
+        "Total flow needs ~7-12s. Vercel Hobby caps at 10s — use Pro (60s) for reliability.",
+        "On Pro set env FF_TIME_BUDGET=55 for the full window.",
     ],
 }
 
@@ -139,7 +150,6 @@ def safe_choice(seq, default=None):
     except Exception:
         return default
 
-
 def safe_json(obj, **kw):
     try:
         return json.dumps(obj, ensure_ascii=False, default=str, **kw)
@@ -148,18 +158,9 @@ def safe_json(obj, **kw):
             return json.dumps(obj, ensure_ascii=True, default=str, **kw)
         except Exception:
             try:
-                return json.dumps({"success": False, "error": "serialization_failed"},
-                                  ensure_ascii=True)
+                return json.dumps({"success": False, "error": "serialization_failed"})
             except Exception:
                 return '{"success":false}'
-
-
-def safe_int(v, default=0):
-    try:
-        return int(v)
-    except Exception:
-        return default
-
 
 # ============================================================
 # Protobuf helpers
@@ -173,20 +174,16 @@ def wRiTe_vArInT(vAlUe):
     oUt.append(vAlUe)
     return bytes(oUt)
 
-
 def fIeLd_iNt(n, v):
     return wRiTe_vArInT((n << 3) | 0) + wRiTe_vArInT(v)
-
 
 def fIeLd_sTr(n, v):
     e = str(v).encode("utf-8")
     return wRiTe_vArInT((n << 3) | 2) + wRiTe_vArInT(len(e)) + e
 
-
 def fIeLd_bYtEs(n, v):
     v = bytes(v)
     return wRiTe_vArInT((n << 3) | 2) + wRiTe_vArInT(len(v)) + v
-
 
 def aSsEmBlE_pRoTo(fields):
     buf = bytearray()
@@ -204,7 +201,6 @@ def aSsEmBlE_pRoTo(fields):
             continue
     return bytes(buf)
 
-
 def rEaD_vArInT(d, o):
     r, s = 0, 0
     while True:
@@ -219,7 +215,6 @@ def rEaD_vArInT(d, o):
         if s > 63:
             raise ValueError("varint too long")
     return r, o
-
 
 def pArSe_pRoTo(d):
     out, o = {}, 0
@@ -248,21 +243,17 @@ def pArSe_pRoTo(d):
                 except Exception:
                     out[fn] = chunk.hex()
             elif wt == 1:
-                out[fn] = d[o:o + 8].hex()
-                o += 8
+                out[fn] = d[o:o + 8].hex(); o += 8
             elif wt == 5:
-                out[fn] = d[o:o + 4].hex()
-                o += 4
+                out[fn] = d[o:o + 4].hex(); o += 4
             else:
                 break
         except Exception:
             break
     return out
 
-
 def eNcRyPt_aEs(plain):
     return AES.new(aEs_KeY, AES.MODE_CBC, aEs_Iv).encrypt(pad(plain, AES.block_size))
-
 
 def dEcOdE_jWt(tok):
     try:
@@ -276,7 +267,6 @@ def dEcOdE_jWt(tok):
     except Exception:
         return {}
 
-
 def jWt_ReGiOn(tok):
     try:
         d = dEcOdE_jWt(tok)
@@ -284,20 +274,14 @@ def jWt_ReGiOn(tok):
     except Exception:
         return None
 
-
 def gA_sV():
     try:
         return str(int(time.time()))
     except Exception:
         return "0"
 
-
-# ============================================================
-# Endpoint helpers
-# ============================================================
 def server_endpoint(_region):
     return sErVeR
-
 
 def client_endpoint(region):
     try:
@@ -310,12 +294,11 @@ def client_endpoint(region):
         return cLiEnT_US
     return cLiEnT_GLOBAL
 
-
 # ============================================================
-# Network calls (each guarded by time budget)
+# Network calls — generous timeouts, only skip if truly out of time
 # ============================================================
 def request_token(session, uid, password, user_agent):
-    to = _call_timeout(6.0)
+    to = _call_timeout(20.0)
     if to is None:
         raise Exception("time_budget_exhausted_token")
     payload = {
@@ -342,7 +325,6 @@ def request_token(session, uid, password, user_agent):
     if not at or not oid:
         raise Exception(f"Token grant failed: {str(data)[:200]}")
     return str(at), str(oid)
-
 
 def major_login_body(access_token, open_id, platform_type, region, ip):
     region_s = str(region).upper()
@@ -380,9 +362,8 @@ def major_login_body(access_token, open_id, platform_type, region, ip):
         107: "1.9393e7b8e53e8aeb",
     }
 
-
 def send_major_login(session, access_token, open_id, platform_type=4, user_agent=None, region="IND"):
-    to = _call_timeout(6.0)
+    to = _call_timeout(20.0)
     if to is None:
         raise Exception("time_budget_exhausted_major_login")
     url = server_endpoint(region) + "MajorLogin"
@@ -410,9 +391,8 @@ def send_major_login(session, access_token, open_id, platform_type=4, user_agent
         raise Exception("MajorLogin response too short")
     return pArSe_pRoTo(r.content[64:])
 
-
 def send_choose_region(session, region, jwt, user_agent=None):
-    to = _call_timeout(4.0)
+    to = _call_timeout(15.0)
     if to is None:
         raise Exception("time_budget_exhausted_choose_region")
     url = server_endpoint(region) + "ChooseRegion"
@@ -434,9 +414,8 @@ def send_choose_region(session, region, jwt, user_agent=None):
     }
     return session.post(url, data=enc, headers=headers, timeout=to, verify=False)
 
-
 def send_get_login_data(session, jwt, open_id, region, user_agent):
-    to = _call_timeout(2.0)
+    to = _call_timeout(8.0)
     if to is None:
         return 0, b""
     url = client_endpoint(region) + "GetLoginData"
@@ -458,7 +437,6 @@ def send_get_login_data(session, jwt, open_id, region, user_agent):
     r = session.post(url, headers=headers, data=enc, verify=False, timeout=to)
     return r.status_code, r.content
 
-
 # ============================================================
 # Main flow
 # ============================================================
@@ -475,27 +453,19 @@ def bind_region(uid, password, region):
         mSDK_ua = safe_choice(mSdK_aGeNtS, mSdK_aGeNtS[0])
         unity_ua = safe_choice(uNiTy_AgEnTs, uNiTy_AgEnTs[0])
 
-        # 1) token
+        # 1) token — required, never skipped
         try:
             access_token, open_id = request_token(session, uid, password, mSDK_ua)
         except Exception as e:
-            return {
-                "success": False,
-                "error": f"token_grant_failed: {e}",
-                "stage": "token",
-                "developer": DEVELOPER,
-            }
+            return {"success": False, "error": f"token_grant_failed: {e}",
+                    "stage": "token", "developer": DEVELOPER}
 
-        # 2) initial MajorLogin
+        # 2) initial MajorLogin — required
         try:
             login1 = send_major_login(session, access_token, open_id, 4, unity_ua, region)
         except Exception as e:
-            return {
-                "success": False,
-                "error": f"major_login_failed: {e}",
-                "stage": "major_login",
-                "developer": DEVELOPER,
-            }
+            return {"success": False, "error": f"major_login_failed: {e}",
+                    "stage": "major_login", "developer": DEVELOPER}
 
         jwt = login1.get(8)
         if isinstance(jwt, bytes):
@@ -504,50 +474,35 @@ def bind_region(uid, password, region):
             except Exception:
                 jwt = ""
         if not jwt:
-            return {
-                "success": False,
-                "error": "major_login_no_jwt",
-                "stage": "major_login",
-                "developer": DEVELOPER,
-            }
+            return {"success": False, "error": "major_login_no_jwt",
+                    "stage": "major_login", "developer": DEVELOPER}
 
         target = "RU" if region == "CIS" else region
         current_lock = jWt_ReGiOn(jwt)
 
         if current_lock and str(current_lock).upper() == target:
-            return {
-                "success": True,
-                "message": f"Account already bound to {target}",
-                "region": region,
-                "lock_region": current_lock,
-                "uid": uid,
-                "jwt": jwt,
-                "developer": DEVELOPER,
-            }
+            return {"success": True,
+                    "message": f"Account already bound to {target}",
+                    "region": region, "lock_region": current_lock,
+                    "uid": uid, "jwt": jwt, "developer": DEVELOPER}
 
-        # 3) ChooseRegion
+        # 3) ChooseRegion — required
         try:
             cr = send_choose_region(session, region, jwt, unity_ua)
             if getattr(cr, "status_code", 0) != 200:
-                return {
-                    "success": False,
-                    "error": f"choose_region_http_{getattr(cr, 'status_code', 0)}",
+                return {"success": False,
+                        "error": f"choose_region_http_{getattr(cr, 'status_code', 0)}",
+                        "stage": "choose_region",
+                        "previous_region": current_lock,
+                        "jwt": jwt, "developer": DEVELOPER}
+        except Exception as e:
+            return {"success": False,
+                    "error": f"choose_region_exception: {e}",
                     "stage": "choose_region",
                     "previous_region": current_lock,
-                    "jwt": jwt,
-                    "developer": DEVELOPER,
-                }
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"choose_region_exception: {e}",
-                "stage": "choose_region",
-                "previous_region": current_lock,
-                "jwt": jwt,
-                "developer": DEVELOPER,
-            }
+                    "jwt": jwt, "developer": DEVELOPER}
 
-        # 4) re-login (single attempt; skip if out of budget)
+        # 4) re-login — required
         new_jwt = None
         relogin_err = None
         try:
@@ -561,28 +516,24 @@ def bind_region(uid, password, region):
             relogin_err = str(e)
 
         if not new_jwt:
-            return {
-                "success": False,
-                "error": ("relogin_no_jwt_after_choose_region"
-                          + (f": {relogin_err}" if relogin_err else "")),
-                "stage": "relogin",
-                "previous_region": current_lock,
-                "developer": DEVELOPER,
-            }
+            return {"success": False,
+                    "error": ("relogin_no_jwt_after_choose_region"
+                              + (f": {relogin_err}" if relogin_err else "")),
+                    "stage": "relogin",
+                    "previous_region": current_lock,
+                    "developer": DEVELOPER}
 
         new_lock = jWt_ReGiOn(new_jwt)
 
-        # 5) optional verification (skipped if out of budget)
+        # 5) optional verification — skipped only if out of time
         verified = None
         try:
             st, content = send_get_login_data(session, new_jwt, open_id, region, unity_ua)
             if st == 200:
                 parsed = pArSe_pRoTo(content)
-                verified = {
-                    "account_uid": parsed.get(1),
-                    "account_name": parsed.get(4),
-                    "region": parsed.get(3),
-                }
+                verified = {"account_uid": parsed.get(1),
+                            "account_name": parsed.get(4),
+                            "region": parsed.get(3)}
         except Exception:
             verified = None
 
@@ -601,14 +552,9 @@ def bind_region(uid, password, region):
         }
 
     except BaseException as e:
-        # catch BaseException so even KeyboardInterrupt/SystemExit
-        # inside the flow can't escape
-        return {
-            "success": False,
-            "error": f"unexpected_exception: {type(e).__name__}: {e}",
-            "stage": "top_level",
-            "developer": DEVELOPER,
-        }
+        return {"success": False,
+                "error": f"unexpected_exception: {type(e).__name__}: {e}",
+                "stage": "top_level", "developer": DEVELOPER}
     finally:
         try:
             if session is not None:
@@ -616,45 +562,35 @@ def bind_region(uid, password, region):
         except BaseException:
             pass
 
-
 # ============================================================
 # HTTP handler
 # ============================================================
 class handler(BaseHTTPRequestHandler):
-    # Silence default stderr logging
     def log_message(self, *args, **kwargs):
         pass
 
     def _send(self, status, body_str):
-        """Guarantee exactly one JSON response per request."""
         try:
             if getattr(self, "_sent", False):
                 return
             self._sent = True
         except BaseException:
             return
-
         try:
             data = body_str.encode("utf-8") if isinstance(body_str, str) else b""
         except BaseException:
-            try:
-                data = safe_json({"success": False, "error": "encoding_failed",
-                                  "developer": DEVELOPER}).encode("utf-8")
-            except BaseException:
-                data = b'{"success":false}'
-
+            data = b'{"success":false,"error":"encoding_failed"}'
         try:
             self.send_response(int(status))
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS")
+            self.send_header("Access-Control-Allow-Methods",
+                             "GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
         except BaseException:
             return
-
-        # Only write body for non-HEAD methods
         try:
             if self.command != "HEAD":
                 self.wfile.write(data)
@@ -674,7 +610,6 @@ class handler(BaseHTTPRequestHandler):
             except BaseException:
                 pass
 
-    # ---- all methods funnel here ----
     def do_GET(self):     self._safe_handle()
     def do_POST(self):    self._safe_handle()
     def do_PUT(self):     self._safe_handle()
@@ -682,13 +617,13 @@ class handler(BaseHTTPRequestHandler):
     def do_PATCH(self):   self._safe_handle()
     def do_HEAD(self):    self._safe_handle()
     def do_TRACE(self):   self._safe_handle()
-    def do_CONNECT(self): self._safe_handle()
 
     def do_OPTIONS(self):
         try:
             self.send_response(204)
             self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS")
+            self.send_header("Access-Control-Allow-Methods",
+                             "GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
             self.send_header("Content-Length", "0")
             self.end_headers()
@@ -703,8 +638,7 @@ class handler(BaseHTTPRequestHandler):
                 length = 0
             if length <= 0:
                 return ""
-            read_len = min(length, MAX_BODY_BYTES)
-            raw = self.rfile.read(read_len)
+            raw = self.rfile.read(min(length, MAX_BODY_BYTES))
             try:
                 return raw.decode("utf-8", errors="ignore")
             except BaseException:
@@ -713,35 +647,31 @@ class handler(BaseHTTPRequestHandler):
             return ""
 
     def _handle(self):
-        # ---- path + query ----
+        # ⚡ KEY FIX: reset the timer on every request
+        _reset_timer()
+
         path = "/"
         params = {}
         try:
             parsed = urlparse(self.path or "/")
-            raw_path = parsed.path or "/"
-            # normalize: strip trailing slash, keep root as "/"
-            path = raw_path.rstrip("/") or "/"
+            path = (parsed.path or "/").rstrip("/") or "/"
             params = {k: v[0] for k, v in parse_qs(parsed.query or "").items()}
         except BaseException:
-            path = "/"
-            params = {}
+            path, params = "/", {}
 
-        # ---- merge POST body ----
         if self.command in ("POST", "PUT", "PATCH"):
             raw_s = self._read_body()
             if raw_s.strip():
                 try:
-                    parsed_json = json.loads(raw_s)
-                    if isinstance(parsed_json, dict):
-                        params.update(parsed_json)
+                    pj = json.loads(raw_s)
+                    if isinstance(pj, dict):
+                        params.update(pj)
                 except BaseException:
                     try:
-                        form = {k: v[0] for k, v in parse_qs(raw_s).items()}
-                        params.update(form)
+                        params.update({k: v[0] for k, v in parse_qs(raw_s).items()})
                     except BaseException:
                         pass
 
-        # ---- normalize inputs ----
         try:
             uid = str(params.get("uid", "") or "").strip()
             password = str(params.get("password", "") or "").strip()
@@ -749,25 +679,19 @@ class handler(BaseHTTPRequestHandler):
         except BaseException:
             uid, password, region = "", "", ""
 
-        # truncate to hard caps (never reject — just ignore extras)
-        if len(uid) > MAX_UID_LEN:
-            uid = uid[:MAX_UID_LEN]
-        if len(password) > MAX_PWD_LEN:
-            password = password[:MAX_PWD_LEN]
-        if len(region) > MAX_REGION_LEN:
-            region = region[:MAX_REGION_LEN]
+        if len(uid) > MAX_UID_LEN:      uid = uid[:MAX_UID_LEN]
+        if len(password) > MAX_PWD_LEN: password = password[:MAX_PWD_LEN]
+        if len(region) > MAX_REGION_LEN: region = region[:MAX_REGION_LEN]
 
-        # ---- route: /bind ----
+        # ---- /bind ----
         if path == "/bind":
             missing = []
             if not uid:      missing.append("uid")
             if not password: missing.append("password")
             if not region:   missing.append("region")
-
             if missing:
                 self._send(200, safe_json({
-                    "success": False,
-                    "error": "missing_parameters",
+                    "success": False, "error": "missing_parameters",
                     "missing": missing,
                     "required": ["uid", "password", "region"],
                     "developer": DEVELOPER,
@@ -776,8 +700,7 @@ class handler(BaseHTTPRequestHandler):
 
             if region not in lAnGuAgE_bY_rEgIoN:
                 self._send(200, safe_json({
-                    "success": False,
-                    "error": "invalid_region",
+                    "success": False, "error": "invalid_region",
                     "given": region,
                     "supported_regions": sorted(lAnGuAgE_bY_rEgIoN.keys()),
                     "developer": DEVELOPER,
@@ -787,11 +710,9 @@ class handler(BaseHTTPRequestHandler):
             try:
                 result = bind_region(uid, password, region)
             except BaseException as e:
-                result = {
-                    "success": False,
-                    "error": f"bind_region_exception: {type(e).__name__}: {e}",
-                    "developer": DEVELOPER,
-                }
+                result = {"success": False,
+                          "error": f"bind_region_exception: {type(e).__name__}: {e}",
+                          "developer": DEVELOPER}
 
             if not isinstance(result, dict):
                 result = {"success": False, "error": "invalid_result_shape",
@@ -801,49 +722,13 @@ class handler(BaseHTTPRequestHandler):
             self._send(200, safe_json(result))
             return
 
-        # ---- route: / (home) ----
+        # ---- / (home) ----
         if path == "/":
             self._send(200, safe_json(HOME_INFO, indent=2))
             return
 
-        # ---- any other path ----
         self._send(200, safe_json({
-            "success": False,
-            "error": "unknown_endpoint",
-            "given": path,
-            "valid_endpoints": {
-                "home": "/",
-                "bind": "/bind",
-            },
+            "success": False, "error": "unknown_endpoint", "given": path,
+            "valid_endpoints": {"home": "/", "bind": "/bind"},
             "developer": DEVELOPER,
         }))
-
-
-# ============================================================
-# Last-ditch: module-level safety net
-# ============================================================
-try:
-    _ = handler  # ensure class exists
-except BaseException:
-    # Should never happen, but if the class failed to build,
-    # provide a minimal fallback that still returns JSON.
-    class handler(BaseHTTPRequestHandler):  # type: ignore
-        def log_message(self, *a, **k):
-            pass
-        def _fallback(self):
-            try:
-                data = b'{"success":false,"error":"init_failed","developer":{"tg":"@DivanSingh"}}'
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
-            except BaseException:
-                pass
-        def do_GET(self):     self._fallback()
-        def do_POST(self):    self._fallback()
-        def do_PUT(self):     self._fallback()
-        def do_DELETE(self):  self._fallback()
-        def do_PATCH(self):   self._fallback()
-        def do_OPTIONS(self): self._fallback()
-        def do_HEAD(self):    self._fallback()
