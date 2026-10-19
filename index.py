@@ -1,8 +1,7 @@
 # ============================================================
-# Free Fire Region Binder — v4 (no GetLoginData)
-# Flow: Token → MajorLogin → ChooseRegion (skipped if already bound)
-#       → MajorLogin (after choose)
-# Every request → 200 + JSON. Never crash.
+# Free Fire Region Binder
+# Public surface: / (home) and /bind only.
+# Internal flow is not disclosed in any response unless ?debug=1
 # ============================================================
 import os
 import json
@@ -22,11 +21,9 @@ try:
 except Exception:
     pass
 
-# ---- per-request budget (reset at top of _handle) ----
-# Hobby default = 9s. For Vercel Pro (60s), set env FF_TIME_BUDGET="55"
 TOTAL_BUDGET = float(os.environ.get("FF_TIME_BUDGET", "9"))
 _MIN_CALL_BUDGET = 2.0
-_REQUEST_START = time.time()  # overwritten per request
+_REQUEST_START = time.time()
 
 
 def _reset_timer():
@@ -42,7 +39,6 @@ def _time_left():
 
 
 def _call_timeout(desired=15.0):
-    """Return per-call timeout, or None only if truly out of time."""
     try:
         left = _time_left()
         if left < _MIN_CALL_BUDGET:
@@ -53,7 +49,7 @@ def _call_timeout(desired=15.0):
 
 
 # ============================================================
-# Home info
+# Home — minimal, no flow disclosed
 # ============================================================
 HOME_INFO = {
     "developer": {
@@ -65,7 +61,6 @@ HOME_INFO = {
         "path": "/bind",
         "methods": ["GET", "POST"],
         "params": ["uid", "password", "region"],
-        "optional_params": ["force"],
         "usage": {
             "GET": "/bind?uid=YOUR_UID&password=YOUR_PASSWORD&region=IND",
             "POST": {
@@ -89,24 +84,12 @@ HOME_INFO = {
         "ME", "IND", "ID", "VN", "TH", "BD",
         "PK", "TW", "CIS", "SAC", "BR",
     ],
-    "flow": [
-        "1. Token grant",
-        "2. MajorLogin (initial)",
-        "3. ChooseRegion (target) — skipped if lock_region already == target",
-        "4. MajorLogin (after choose)",
-    ],
-    "notes": [
-        "ChooseRegion only succeeds on accounts with empty lock_region (fresh accounts).",
-        "If account is already locked to a different region, rebinding fails with a clear error.",
-        "If account is already on target region, ChooseRegion is skipped and flow succeeds.",
-        "Set env FF_TIME_BUDGET=55 on Vercel Pro for full window; Hobby caps at 10s.",
-    ],
 }
 
 DEVELOPER = HOME_INFO["developer"]
 
 # ============================================================
-# Constants
+# Constants (internal)
 # ============================================================
 aEs_KeY = bytes([89, 103, 38, 116, 99, 37, 68, 69, 117, 104, 54, 37, 90, 99, 94, 56])
 aEs_Iv = bytes([54, 111, 121, 90, 68, 114, 50, 50, 69, 51, 121, 99, 104, 106, 77, 37])
@@ -118,7 +101,6 @@ rElEaSe_TaG = "OB55"
 rUnTiMe_vErSiOn = "2.133.9"
 
 sErVeR = "https://loginbp.ppmainecoonghj.com/"
-
 oAuTh_ToKeN = "https://100067.connect.garena.com/oauth/guest/token/grant"
 
 lAnGuAgE_bY_rEgIoN = {
@@ -312,7 +294,7 @@ def gA_sV():
 def request_token(session, uid, password, user_agent):
     to = _call_timeout(20.0)
     if to is None:
-        raise Exception("time_budget_exhausted_token")
+        raise Exception("timeout")
     payload = {
         "uid": uid, "password": password,
         "response_type": "token", "client_type": "2",
@@ -326,16 +308,16 @@ def request_token(session, uid, password, user_agent):
     }
     r = session.post(oAuTh_ToKeN, data=payload, headers=headers, timeout=to)
     if r.status_code != 200:
-        raise Exception(f"Token HTTP {r.status_code}: {r.text[:200]}")
+        raise Exception(f"http_{r.status_code}")
     try:
         data = r.json()
     except Exception:
-        raise Exception(f"Token JSON parse failed: {r.text[:200]}")
+        raise Exception("bad_response")
     if not isinstance(data, dict):
-        raise Exception(f"Token unexpected shape: {str(data)[:200]}")
+        raise Exception("bad_response")
     at, oid = data.get("access_token"), data.get("open_id")
     if not at or not oid:
-        raise Exception(f"Token grant failed: {str(data)[:200]}")
+        raise Exception("auth_rejected")
     return str(at), str(oid)
 
 
@@ -379,7 +361,7 @@ def major_login_body(access_token, open_id, platform_type, region, ip):
 def send_major_login(session, access_token, open_id, platform_type=4, user_agent=None, region="IND"):
     to = _call_timeout(20.0)
     if to is None:
-        raise Exception("time_budget_exhausted_major_login")
+        raise Exception("timeout")
     url = sErVeR + "MajorLogin"
     host = url.split("/")[2] if "//" in url else url
     body = major_login_body(access_token, open_id, platform_type, region,
@@ -400,16 +382,16 @@ def send_major_login(session, access_token, open_id, platform_type=4, user_agent
     }
     r = session.post(url, data=enc, headers=headers, timeout=to, verify=False)
     if r.status_code != 200:
-        raise Exception(f"MajorLogin HTTP {r.status_code}: {r.text[:200]}")
+        raise Exception(f"http_{r.status_code}")
     if len(r.content) <= 64:
-        raise Exception("MajorLogin response too short")
+        raise Exception("bad_response")
     return pArSe_pRoTo(r.content[64:])
 
 
 def send_choose_region(session, region, jwt, user_agent=None):
     to = _call_timeout(15.0)
     if to is None:
-        raise Exception("time_budget_exhausted_choose_region")
+        raise Exception("timeout")
     url = sErVeR + "ChooseRegion"
     host = url.split("/")[2] if "//" in url else url
     target = "RU" if str(region).upper() == "CIS" else str(region).upper()
@@ -431,11 +413,18 @@ def send_choose_region(session, region, jwt, user_agent=None):
 
 
 # ============================================================
-# Main flow — 4 steps, no GetLoginData
+# Internal flow — full detail kept private, returned in _trace
 # ============================================================
-def bind_region(uid, password, region, force=False):
+def _run_bind(uid, password, region, force=False):
+    """
+    Internal. Returns (public_result, trace_dict).
+    public_result: only safe-to-expose fields.
+    trace_dict:    internal details (stage names, statuses, regions) — used
+                   only when caller passes ?debug=1.
+    """
     region = str(region).upper()
     session = None
+    trace = {}
     try:
         session = requests.Session()
         try:
@@ -446,23 +435,23 @@ def bind_region(uid, password, region, force=False):
         mSDK_ua = safe_choice(mSdK_aGeNtS, mSdK_aGeNtS[0])
         unity_ua = safe_choice(uNiTy_AgEnTs, uNiTy_AgEnTs[0])
 
-        # ── STEP 1: Token grant ──────────────────────────────
+        # STEP 1: token
         try:
             access_token, open_id = request_token(session, uid, password, mSDK_ua)
         except Exception as e:
-            return {"success": False,
-                    "error": f"token_grant_failed: {e}",
-                    "stage": "token",
-                    "developer": DEVELOPER}
+            trace["stage"] = "token"
+            trace["reason"] = str(e)
+            return ({"success": False, "error": "auth_failed",
+                     "developer": DEVELOPER}, trace)
 
-        # ── STEP 2: Initial MajorLogin ───────────────────────
+        # STEP 2: initial login
         try:
             login1 = send_major_login(session, access_token, open_id, 4, unity_ua, region)
         except Exception as e:
-            return {"success": False,
-                    "error": f"major_login_initial_failed: {e}",
-                    "stage": "major_login_initial",
-                    "developer": DEVELOPER}
+            trace["stage"] = "major_login_initial"
+            trace["reason"] = str(e)
+            return ({"success": False, "error": "login_failed",
+                     "developer": DEVELOPER}, trace)
 
         jwt1 = login1.get(8)
         if isinstance(jwt1, bytes):
@@ -471,68 +460,58 @@ def bind_region(uid, password, region, force=False):
             except Exception:
                 jwt1 = ""
         if not jwt1:
-            return {"success": False,
-                    "error": "major_login_initial_no_jwt",
-                    "stage": "major_login_initial",
-                    "developer": DEVELOPER}
+            trace["stage"] = "major_login_initial"
+            trace["reason"] = "no_jwt"
+            return ({"success": False, "error": "login_failed",
+                     "developer": DEVELOPER}, trace)
 
         target = "RU" if region == "CIS" else region
         previous_region = jWt_ReGiOn(jwt1)
         already_on_target = bool(previous_region) and str(previous_region).upper() == target
 
-        # ── STEP 3: ChooseRegion (skipped if already on target) ─
-        choose_region_status = None
-        choose_region_body = None
-        choose_region_ok = False
-        choose_region_skipped = False
+        trace["previous_region"] = previous_region
+        trace["target_region"] = target
+        trace["already_on_target"] = already_on_target
+
+        # STEP 3: choose region
+        choose_ok = False
+        choose_skipped = False
 
         if already_on_target and not force:
-            choose_region_skipped = True
+            choose_skipped = True
+            trace["choose_region"] = "skipped"
         else:
             try:
                 cr = send_choose_region(session, region, jwt1, unity_ua)
-                choose_region_status = getattr(cr, "status_code", 0)
-                try:
-                    choose_region_body = (cr.text or "")[:1000] if hasattr(cr, "text") else None
-                except Exception:
-                    choose_region_body = None
-                if choose_region_status == 200:
-                    choose_region_ok = True
+                st = getattr(cr, "status_code", 0)
+                trace["choose_region_status"] = st
+                if st == 200:
+                    choose_ok = True
+                    trace["choose_region"] = "ok"
+                else:
+                    trace["choose_region"] = "failed"
+                    try:
+                        trace["choose_region_body"] = (cr.text or "")[:400]
+                    except Exception:
+                        pass
             except Exception as e:
-                choose_region_status = None
-                choose_region_body = str(e)[:500]
+                trace["choose_region"] = "exception"
+                trace["choose_region_reason"] = str(e)[:200]
 
-        # Failure handling — not on target and ChooseRegion rejected → can't rebind
-        if not choose_region_ok and not choose_region_skipped and not already_on_target:
-            return {
-                "success": False,
-                "error": f"choose_region_failed_status_{choose_region_status}",
-                "stage": "choose_region",
-                "target_region": target,
-                "previous_region": previous_region,
-                "choose_region_status": choose_region_status,
-                "choose_region_body": choose_region_body,
-                "note": (
-                    "ChooseRegion is a one-time endpoint — it only works on "
-                    "accounts whose lock_region is empty (fresh / never played). "
-                    f"This account is already locked to {previous_region!r} and "
-                    f"cannot be rebound to {target!r}. Use a fresh account or "
-                    "the force=true param to inspect the raw server response."
-                ),
-                "jwt": jwt1,
-                "developer": DEVELOPER,
-            }
+        if not choose_ok and not choose_skipped and not already_on_target:
+            trace["stage"] = "choose_region"
+            return ({"success": False,
+                     "error": "region_bind_rejected",
+                     "developer": DEVELOPER}, trace)
 
-        # ── STEP 4: MajorLogin (after choose, target region) ──
+        # STEP 4: login after choose
         try:
             login2 = send_major_login(session, access_token, open_id, 4, unity_ua, region)
         except Exception as e:
-            return {"success": False,
-                    "error": f"major_login_after_choose_failed: {e}",
-                    "stage": "major_login_after_choose",
-                    "previous_region": previous_region,
-                    "choose_region_status": choose_region_status,
-                    "developer": DEVELOPER}
+            trace["stage"] = "major_login_after_choose"
+            trace["reason"] = str(e)
+            return ({"success": False, "error": "login_failed",
+                     "developer": DEVELOPER}, trace)
 
         jwt2 = login2.get(8)
         if isinstance(jwt2, bytes):
@@ -541,44 +520,38 @@ def bind_region(uid, password, region, force=False):
             except Exception:
                 jwt2 = ""
         if not jwt2:
-            return {"success": False,
-                    "error": "major_login_after_choose_no_jwt",
-                    "stage": "major_login_after_choose",
-                    "previous_region": previous_region,
-                    "developer": DEVELOPER}
+            trace["stage"] = "major_login_after_choose"
+            trace["reason"] = "no_jwt"
+            return ({"success": False, "error": "login_failed",
+                     "developer": DEVELOPER}, trace)
 
         new_lock = jWt_ReGiOn(jwt2)
+        trace["new_lock_region"] = new_lock
         ok = bool(new_lock) and str(new_lock).upper() == target
+        trace["final_ok"] = ok
 
-        if ok and choose_region_ok:
-            message = f"Region bound to {target}"
-        elif ok and choose_region_skipped:
-            message = f"Account already on {target} (ChooseRegion skipped)"
-        elif ok and already_on_target:
-            message = f"Account already on {target} (ChooseRegion failed but region matches)"
-        else:
-            message = f"lock_region={new_lock!r} (expected {target})"
+        if ok:
+            return ({
+                "success": True,
+                "message": "region updated successfully",
+                "region": target,
+                "uid": uid,
+                "jwt": jwt2,
+                "developer": DEVELOPER,
+            }, trace)
 
-        return {
-            "success":               ok,
-            "message":               message,
-            "target_region":         target,
-            "previous_region":       previous_region,
-            "new_lock_region":       new_lock,
-            "changed":               choose_region_ok,
-            "already_bound":         choose_region_skipped or already_on_target,
-            "choose_region_status":  choose_region_status,
-            "choose_region_body":    choose_region_body if not choose_region_ok else None,
-            "uid":                   uid,
-            "jwt":                   jwt2,
-            "developer":             DEVELOPER,
-        }
+        # final lock didn't match target — still hide why
+        return ({
+            "success": False,
+            "error": "region_bind_rejected",
+            "developer": DEVELOPER,
+        }, trace)
 
     except BaseException as e:
-        return {"success": False,
-                "error": f"unexpected_exception: {type(e).__name__}: {e}",
-                "stage": "top_level",
-                "developer": DEVELOPER}
+        trace["stage"] = "internal"
+        trace["reason"] = f"{type(e).__name__}: {e}"
+        return ({"success": False, "error": "internal_error",
+                 "developer": DEVELOPER}, trace)
     finally:
         try:
             if session is not None:
@@ -629,7 +602,7 @@ class handler(BaseHTTPRequestHandler):
             try:
                 self._send(200, safe_json({
                     "success": False,
-                    "error": f"handler_exception: {type(e).__name__}: {e}",
+                    "error": "internal_error",
                     "developer": DEVELOPER,
                 }))
             except BaseException:
@@ -672,10 +645,8 @@ class handler(BaseHTTPRequestHandler):
             return ""
 
     def _handle(self):
-        # ⚡ reset per-request timer
         _reset_timer()
 
-        # ---- 1) parse URL ----
         raw_path = "/"
         params = {}
         try:
@@ -685,7 +656,6 @@ class handler(BaseHTTPRequestHandler):
         except BaseException:
             raw_path, params = "/", {}
 
-        # ---- 2) merge POST body ----
         if self.command in ("POST", "PUT", "PATCH"):
             raw_s = self._read_body()
             if raw_s.strip():
@@ -699,7 +669,6 @@ class handler(BaseHTTPRequestHandler):
                     except BaseException:
                         pass
 
-        # ---- 3) normalize inputs ----
         try:
             uid = str(params.get("uid", "") or "").strip()
             password = str(params.get("password", "") or "").strip()
@@ -712,22 +681,19 @@ class handler(BaseHTTPRequestHandler):
         if len(region) > MAX_REGION_LEN: region = region[:MAX_REGION_LEN]
 
         force = str(params.get("force", "") or "").strip().lower() in ("1", "true", "yes")
+        debug = str(params.get("debug", "") or "").strip().lower() in ("1", "true", "yes")
 
-        # ---- 4) recover intended path (Vercel rewrites → /index.py) ----
+        # recover path from Vercel rewrite
         path = raw_path.rstrip("/") or "/"
-
         explicit = str(params.pop("__path", "") or "").strip()
         if explicit:
             if not explicit.startswith("/"):
                 explicit = "/" + explicit
             path = explicit.rstrip("/") or "/"
         elif path in ("/index.py", "/index", "/api", "/api/index", "/api/index.py"):
-            if uid or password or region:
-                path = "/bind"
-            else:
-                path = "/"
+            path = "/bind" if (uid or password or region) else "/"
 
-        # ---- 5) route ----
+        # ---- /bind ----
         if path == "/bind":
             missing = []
             if not uid:       missing.append("uid")
@@ -739,7 +705,6 @@ class handler(BaseHTTPRequestHandler):
                     "success": False,
                     "error": "missing_parameters",
                     "missing": missing,
-                    "required": ["uid", "password", "region"],
                     "developer": DEVELOPER,
                 }))
                 return
@@ -748,36 +713,41 @@ class handler(BaseHTTPRequestHandler):
                 self._send(200, safe_json({
                     "success": False,
                     "error": "invalid_region",
-                    "given": region,
                     "supported_regions": sorted(lAnGuAgE_bY_rEgIoN.keys()),
                     "developer": DEVELOPER,
                 }))
                 return
 
             try:
-                result = bind_region(uid, password, region, force=force)
-            except BaseException as e:
-                result = {"success": False,
-                          "error": f"bind_region_exception: {type(e).__name__}: {e}",
-                          "developer": DEVELOPER}
+                public_result, trace = _run_bind(uid, password, region, force=force)
+            except BaseException:
+                public_result = {"success": False,
+                                 "error": "internal_error",
+                                 "developer": DEVELOPER}
+                trace = {}
 
-            if not isinstance(result, dict):
-                result = {"success": False,
-                          "error": "invalid_result_shape",
-                          "developer": DEVELOPER}
+            if not isinstance(public_result, dict):
+                public_result = {"success": False,
+                                 "error": "internal_error",
+                                 "developer": DEVELOPER}
 
-            result.setdefault("developer", DEVELOPER)
-            self._send(200, safe_json(result))
+            public_result.setdefault("developer", DEVELOPER)
+
+            if debug:
+                public_result["_trace"] = trace
+
+            self._send(200, safe_json(public_result))
             return
 
+        # ---- / ----
         if path == "/":
             self._send(200, safe_json(HOME_INFO, indent=2))
             return
 
+        # ---- unknown ----
         self._send(200, safe_json({
             "success": False,
             "error": "unknown_endpoint",
-            "given": raw_path,
             "valid_endpoints": {"home": "/", "bind": "/bind"},
             "developer": DEVELOPER,
         }))
